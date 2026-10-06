@@ -1,0 +1,10 @@
+# ESP-IDF 构建产物（不纳入版本库）
+firmwares/*/build/
+firmwares/*/build_host/
+firmwares/*/managed_components/
+firmwares/*/sdkconfig
+firmwares/*/sdkconfig.old
+
+# 工具链与依赖包（可重新下载，不纳入版本库）
+firmwares/*/tools/zigpkgs/
+firmwares/*/tools/node_modules/

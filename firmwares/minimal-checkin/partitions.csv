@@ -1,0 +1,6 @@
+# 极简打卡：8MB Flash 分区表
+# 字体较大（GB2312 全量 16/24px 两个 LVGL 字体 ≈2.9MB），factory 占满剩余空间。
+# Name,   Type, SubType, Offset,   Size
+nvs,      data, nvs,     0x9000,   0x6000
+phy_init, data, phy,     0xf000,   0x1000
+factory,  app,  factory, 0x10000,  0x7F0000

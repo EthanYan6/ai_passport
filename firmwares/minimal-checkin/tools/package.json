@@ -1,0 +1,9 @@
+{
+  "name": "minimal-checkin-tools",
+  "private": true,
+  "description": "极简打卡：字体生成工具（lv_font_conv）",
+  "type": "module",
+  "dependencies": {
+    "lv_font_conv": "^1.5.3"
+  }
+}
