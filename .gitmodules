@@ -1,3 +1,4 @@
 [submodule "ai-passport-repo"]
 	path = ai-passport-repo
 	url = https://gitee.com/FoloToy/ai-passport.git
+	ignore = dirty
