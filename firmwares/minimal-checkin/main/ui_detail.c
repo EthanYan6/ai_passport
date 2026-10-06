@@ -1,7 +1,7 @@
 // main/ui_detail.c —— 单日打卡详情页
 //
-// 布局（240x320，米纸底）：
-//   标题 "2026年10月6日 周二"  y=24（cn_24）
+// 布局（240x320，米纸底；顶部 0..28 让位 top layer 状态栏）：
+//   标题 "2026年10月6日 周二"  y=36（cn_24）
 //   当日最终状态行（来自位图）  y=64
 //   打卡流水三列（事项/状态/时间，x 与主页一致 26/116/174），每行 20px，y 起 94
 //   底部提示 "按 OK 返回月历"    y=298
@@ -34,7 +34,7 @@ void ui_detail_show(int year, int month, int day)
     lv_obj_set_style_text_color(title, lv_color_hex(UI_INK), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_width(title, 240);
-    lv_obj_set_pos(title, 0, 24);
+    lv_obj_set_pos(title, 0, 36);
     lv_label_set_text(title, buf);
 
     // ---- 当日最终状态（来自位图；旧固件标记的日子可能有状态而无流水） ----

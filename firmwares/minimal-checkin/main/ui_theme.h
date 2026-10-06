@@ -3,6 +3,8 @@
 // 风格：拟物、扁平、简约、浅色护眼，阴影制造立体感。
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "lvgl.h"
 
 // ---------------- 色板（浅色护眼） ----------------
@@ -33,6 +35,23 @@ lv_obj_t *ui_battery_create(lv_obj_t *parent, int x, int y);
 // 读取 bsp_battery_soc() 并刷新显示；SOC 不可用时显示 "--"
 void ui_battery_refresh(lv_obj_t *battery_widget);
 
+// 深色底（休眠页）配色开关：切换外壳/文字为浅色
+void ui_battery_set_dark(lv_obj_t *battery_widget, bool dark);
+
 // ---------------- WiFi 图标 ----------------
 // 返回 LV_SYMBOL_WIFI 标签（montserrat_16）
 lv_obj_t *ui_wifi_icon_create(lv_obj_t *parent, int x, int y);
+
+// ---------------- 顶栏状态栏 ----------------
+// 在 lv_layer_top() 上构建一次：WiFi 图标 + 状态文字 + 电池。
+// 悬于所有页面之上，因此每个页面（含弹窗/休眠）都能看到。
+void ui_statusbar_build(void);
+
+// 每秒调用：内部 5 秒一次刷新电池读数
+void ui_statusbar_tick(void);
+
+// 更新 WiFi 显示（文字 + 文字色 + 图标色）
+void ui_statusbar_set_wifi(const char *text, uint32_t text_color, uint32_t icon_color);
+
+// 深色底（休眠页）配色开关：墨色系文字换为柔灰，绿/红保留
+void ui_statusbar_set_dark(bool dark);

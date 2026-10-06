@@ -1,9 +1,9 @@
 // main/ui_provision.c —— 配网页：扫码连热点 → 手机门户配置
 //
-// 布局（240x320，米纸底）：
-//   标题"WiFi 配网"  y=16
-//   QR 白卡 190x190 @(25,48)（含二维码）
-//   状态行 y=254 / y=272 / y=292
+// 布局（240x320，米纸底；顶部 0..28 让位 top layer 状态栏）：
+//   标题"WiFi 配网"  y=36
+//   QR 白卡 180x180 @(30,64)（含二维码）
+//   状态行 y=252 / y=272 / y=292
 // 二维码内容 "WIFI:T:WPA;S:Checkin-XXXX;P:12345678;;"（标准 WiFi QR）。
 // 绘制：LV_EVENT_DRAW_MAIN 回调内逐模块 lv_draw_rect。
 #include "ui_provision.h"
@@ -15,9 +15,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#define QR_CARD_X   25
-#define QR_CARD_Y   48
-#define QR_CARD_S   190
+#define QR_CARD_X   30
+#define QR_CARD_Y   64
+#define QR_CARD_S   180
 
 // 二维码缓冲（内容 40 字节级别 → v3 足够；放宽到 v4 上限）
 static uint8_t s_qr[qrcodegen_BUFFER_LEN_FOR_VERSION(4)];
@@ -86,7 +86,7 @@ void ui_provision_show(const char *ap_name, const char *pass)
     lv_obj_set_style_text_color(title, lv_color_hex(UI_INK), 0);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_width(title, 240);
-    lv_obj_set_pos(title, 0, 14);
+    lv_obj_set_pos(title, 0, 36);
     lv_label_set_text(title, "WiFi 配网");
 
     // QR 白卡（拟物阴影）

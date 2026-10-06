@@ -22,6 +22,7 @@ void ui_standby_show(void)
 
     s_page = ui_page_create(lv_screen_active());
     lv_obj_set_style_bg_color(s_page, lv_color_hex(0x1B1E22), 0);   // 深炭灰，不纯黑
+    ui_statusbar_set_dark(true);   // 顶栏状态栏换深色底配色
 
     // 年月日
     char buf[48];
@@ -83,6 +84,7 @@ void ui_standby_hide(void)
     if (!s_page) return;
     lv_obj_delete(s_page);
     s_page = NULL;
+    ui_statusbar_set_dark(false);   // 恢复浅色底配色
 }
 
 bool ui_standby_visible(void)

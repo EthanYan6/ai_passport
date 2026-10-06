@@ -1,6 +1,10 @@
 // main/ui_theme.c —— 主题实现
 #include "ui_theme.h"
+#include "ui_fonts.h"
 #include "bsp_battery.h"
+
+#include <stdio.h>
+#include <string.h>
 
 // ---------------- 页面/面板 ----------------
 
@@ -44,6 +48,7 @@ lv_obj_t *ui_panel_create(lv_obj_t *parent, int x, int y, int w, int h)
 typedef struct {
     lv_obj_t *body;      // 自绘电池
     lv_obj_t *label;     // 百分比文字
+    bool dark;           // 深色底（休眠页）配色
 } battery_widget_t;
 
 static void battery_draw_cb(lv_event_t *e)
@@ -63,18 +68,18 @@ static void battery_draw_cb(lv_event_t *e)
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
 
-    // 1) 电池外壳（圆角矩形描边）
-    dsc.bg_color = lv_color_hex(UI_PANEL);
+    // 1) 电池外壳（圆角矩形描边；深色底时用柔灰描边+深底）
+    dsc.bg_color = lv_color_hex(bw->dark ? 0x1B1E22 : UI_PANEL);
     dsc.bg_opa = LV_OPA_COVER;
     dsc.radius = 2;
-    dsc.border_color = lv_color_hex(UI_INK);
+    dsc.border_color = lv_color_hex(bw->dark ? 0x8A9098 : UI_INK);
     dsc.border_opa = LV_OPA_80;
     dsc.border_width = 2;
     lv_area_t shell = { .x1 = a.x1, .y1 = a.y1, .x2 = a.x1 + w - 5, .y2 = a.y2 };
     lv_draw_rect(layer, &dsc, &shell);
 
     // 2) 电池正极凸起
-    dsc.bg_color = lv_color_hex(UI_INK);
+    dsc.bg_color = lv_color_hex(bw->dark ? 0x8A9098 : UI_INK);
     dsc.bg_opa = LV_OPA_80;
     dsc.border_width = 0;
     dsc.radius = 1;
@@ -145,6 +150,17 @@ void ui_battery_refresh(lv_obj_t *battery_widget)
     lv_obj_invalidate(battery_widget);
 }
 
+void ui_battery_set_dark(lv_obj_t *battery_widget, bool dark)
+{
+    if (!battery_widget) return;
+    battery_widget_t *bw = lv_obj_get_user_data(battery_widget);
+    if (!bw || bw->dark == dark) return;
+    bw->dark = dark;
+    lv_obj_set_style_text_color(bw->label,
+        lv_color_hex(dark ? 0xC2C7CC : UI_INK), 0);
+    lv_obj_invalidate(battery_widget);
+}
+
 // ---------------- WiFi 图标 ----------------
 
 lv_obj_t *ui_wifi_icon_create(lv_obj_t *parent, int x, int y)
@@ -155,4 +171,83 @@ lv_obj_t *ui_wifi_icon_create(lv_obj_t *parent, int x, int y)
     lv_obj_set_style_text_color(icon, lv_color_hex(UI_INK), 0);
     lv_label_set_text(icon, LV_SYMBOL_WIFI);
     return icon;
+}
+
+// ---------------- 顶栏状态栏 ----------------
+// 建在 lv_layer_top() 上：悬浮于所有页面（含弹窗遮罩/休眠页）之上，
+// 一处构建、全页共显；配色随休眠页深色底切换。
+
+static lv_obj_t *s_sb_wifi;     // WiFi 图标
+static lv_obj_t *s_sb_ssid;     // SSID/状态文字
+static lv_obj_t *s_sb_battery;  // 电池
+
+static bool s_sb_dark;                            // 深色底模式
+static char s_sb_text[40];                        // 最近一次 WiFi 文字
+static uint32_t s_sb_text_color, s_sb_icon_color; // 最近一次配色
+
+// 深色底下的等价色：墨色系换柔灰，绿/红本就清晰则保留
+static uint32_t sb_adapt_color(uint32_t color, bool dark)
+{
+    if (!dark) return color;
+    if (color == UI_INK) return 0xC2C7CC;
+    if (color == UI_INK_SOFT) return 0x9AA0A6;
+    return color;
+}
+
+void ui_statusbar_build(void)
+{
+    if (s_sb_battery) return;   // 幂等
+
+    lv_obj_t *layer = lv_layer_top();
+    s_sb_wifi = ui_wifi_icon_create(layer, 10, 8);
+
+    s_sb_ssid = lv_label_create(layer);
+    lv_obj_set_pos(s_sb_ssid, 28, 9);
+    lv_obj_set_width(s_sb_ssid, 130);
+    lv_obj_set_style_text_font(s_sb_ssid, &font_cn_16, 0);
+    lv_obj_set_style_text_color(s_sb_ssid, lv_color_hex(UI_INK_SOFT), 0);
+    lv_label_set_long_mode(s_sb_ssid, LV_LABEL_LONG_DOT);
+    lv_label_set_text(s_sb_ssid, "未连接");
+
+    s_sb_battery = ui_battery_create(layer, 168, 8);
+
+    strlcpy(s_sb_text, "未连接", sizeof(s_sb_text));
+    s_sb_text_color = UI_INK_SOFT;
+    s_sb_icon_color = UI_INK_SOFT;
+}
+
+void ui_statusbar_tick(void)
+{
+    // 电池（I2C 读取，5 秒一次足够）
+    static int s_bat_div;
+    if (++s_bat_div >= 5) {
+        s_bat_div = 0;
+        ui_battery_refresh(s_sb_battery);
+    }
+}
+
+void ui_statusbar_set_wifi(const char *text, uint32_t text_color, uint32_t icon_color)
+{
+    if (!s_sb_ssid || !text) return;
+    snprintf(s_sb_text, sizeof(s_sb_text), "%s", text);
+    s_sb_text_color = text_color;
+    s_sb_icon_color = icon_color;
+
+    lv_label_set_text(s_sb_ssid, s_sb_text);
+    lv_obj_set_style_text_color(s_sb_ssid,
+        lv_color_hex(sb_adapt_color(s_sb_text_color, s_sb_dark)), 0);
+    lv_obj_set_style_text_color(s_sb_wifi,
+        lv_color_hex(sb_adapt_color(s_sb_icon_color, s_sb_dark)), 0);
+}
+
+void ui_statusbar_set_dark(bool dark)
+{
+    if (s_sb_dark == dark) return;
+    s_sb_dark = dark;
+
+    lv_obj_set_style_text_color(s_sb_wifi,
+        lv_color_hex(sb_adapt_color(s_sb_icon_color, dark)), 0);
+    lv_obj_set_style_text_color(s_sb_ssid,
+        lv_color_hex(sb_adapt_color(s_sb_text_color, dark)), 0);
+    ui_battery_set_dark(s_sb_battery, dark);
 }

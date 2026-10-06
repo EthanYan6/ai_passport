@@ -271,6 +271,7 @@ static void tick_timer_cb(lv_timer_t *timer)
     }
 
     if (s_mode != APP_MODE_STANDBY) ui_main_tick();
+    ui_statusbar_tick();   // 状态栏电池（休眠时也刷新）
 
     // 30s 无操作 → 休眠（配网页除外）
     if (s_mode != APP_MODE_PROVISION && s_mode != APP_MODE_STANDBY) {
@@ -310,6 +311,7 @@ void app_main(void)
     if (!bsp_lvgl_lock(1000)) return;
     s_screen = lv_screen_active();
     ui_main_build(s_screen);
+    ui_statusbar_build();   // top layer 状态栏：悬浮于所有页面之上
     bsp_lvgl_unlock();
 
     bool has_creds = checkin_store_has_wifi();
