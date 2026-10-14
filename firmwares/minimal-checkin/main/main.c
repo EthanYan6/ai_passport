@@ -190,15 +190,15 @@ static void handle_button(bsp_btn_t btn, bsp_btn_ev_t ev)
         break;
 
     case APP_MODE_CALENDAR:
-        if (ev != BSP_BTN_CLICK && ev != BSP_BTN_LONG && ev != BSP_BTN_LONG_HOLD) break;
+        if (ev != BSP_BTN_CLICK && ev != BSP_BTN_LONG) break;
         if (btn == BSP_BTN_UP && ev == BSP_BTN_CLICK) {
             ui_calendar_move_selection(-1);     // 上键：前一天
         } else if (btn == BSP_BTN_DOWN && ev == BSP_BTN_CLICK) {
             ui_calendar_move_selection(1);      // 下键：后一天
-        } else if (btn == BSP_BTN_UP && ev == BSP_BTN_LONG_HOLD) {
-            ui_calendar_move_selection(-1);     // 长按上键不放：快速向前逐日移动
-        } else if (btn == BSP_BTN_DOWN && ev == BSP_BTN_LONG_HOLD) {
-            ui_calendar_move_selection(1);      // 长按下键不放：快速向后逐日移动
+        } else if (btn == BSP_BTN_UP && ev == BSP_BTN_LONG) {
+            ui_calendar_move_selection(-7);     // 长按上键：快速向前一周
+        } else if (btn == BSP_BTN_DOWN && ev == BSP_BTN_LONG) {
+            ui_calendar_move_selection(7);      // 长按下键：快速向后一周
         } else if (btn == BSP_BTN_OK && ev == BSP_BTN_CLICK) {
             int y, m, d;                         // OK：查看选中日详情
             if (ui_calendar_selected_date(&y, &m, &d)) {

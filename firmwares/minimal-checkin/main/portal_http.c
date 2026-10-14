@@ -189,6 +189,10 @@ static const char *PORTAL_HTML_HEAD =
     "#nets{max-height:40vh;overflow-y:auto}"
     "#nets div{padding:10px;border-bottom:1px solid #eee;display:flex;"
     "justify-content:space-between;cursor:pointer}"
+    ".row{display:flex;gap:6px;align-items:center}"
+    ".row .item{flex:1;width:auto;margin:0}"
+    ".del{width:48px;padding:10px 0;margin:0;flex:none;background:#d96357;"
+    "font-size:14px}"
     "</style></head><body><h1>极简打卡 · 配网</h1>";
 
 // 门户页由多个片段拼装，避免巨型字符串常量
@@ -254,8 +258,13 @@ static void send_portal_page(int sock)
         "<script>"
         "function additem(){var l=document.getElementById('ilist');"
         "if(l.getElementsByClassName('item').length>=6)return;"
+        "var r=document.createElement('div');r.className='row';"
         "var i=document.createElement('input');i.className='item';"
-        "i.maxLength=15;i.placeholder='打卡事项（5个汉字内）';l.appendChild(i)}"
+        "i.maxLength=15;i.placeholder='打卡事项（5个汉字内）';"
+        "var d=document.createElement('button');d.className='del';"
+        "d.type='button';d.textContent='删除';"
+        "d.onclick=function(){r.remove()};"
+        "r.appendChild(i);r.appendChild(d);l.appendChild(r)}"
         "function saveitems(){var es=document.getElementById('ilist')"
         ".getElementsByClassName('item');var a=[];"
         "for(var k=0;k<es.length;k++){var v=es[k].value.trim();if(v)a.push(v)}"
