@@ -18,11 +18,17 @@
 #define PCMON_GPU_NAME_MAX 28
 #define PCMON_GPU_VENDOR_MAX 12
 
+#define PCMON_ARK_PLAN_MAX 12
+#define PCMON_ARK_NAME_MAX 16
+#define PCMON_ARK_TITLE_MAX 32
+#define PCMON_ARK_WINDOWS 3 // 0 = last 5 hours, 1 = week, 2 = month
+
 #define PCMON_NEED_PROC "proc"
 #define PCMON_NEED_PORT "port"
 #define PCMON_NEED_GPU "gpu"
+#define PCMON_NEED_ARK "ark"
 
-#define PCMON_PROTO_VER 4
+#define PCMON_PROTO_VER 5
 
 typedef struct {
     bool valid;
@@ -134,6 +140,18 @@ typedef struct {
     float power; // watts
 } pcmon_gpu_t;
 
+typedef struct {
+    bool valid;
+    int err; // 0 = ok, 1 = keys not configured, 2 = fetch failed
+    char title[PCMON_ARK_TITLE_MAX]; // page title (UTF-8, may be Chinese)
+    char plan[PCMON_ARK_PLAN_MAX]; // plan tag, e.g. "Pro"
+    char name[PCMON_ARK_NAME_MAX]; // owner tag (UTF-8, may be Chinese)
+    bool has_win[PCMON_ARK_WINDOWS];
+    float used[PCMON_ARK_WINDOWS];
+    float quota[PCMON_ARK_WINDOWS];
+    long reset_s[PCMON_ARK_WINDOWS]; // seconds until the window resets
+} pcmon_ark_t;
+
 void pcmon_stats_reset(pcmon_stats_t *stats);
 
 void pcmon_proc_list_reset(pcmon_proc_list_t *list);
@@ -141,6 +159,8 @@ void pcmon_proc_list_reset(pcmon_proc_list_t *list);
 void pcmon_port_list_reset(pcmon_port_list_t *list);
 
 void pcmon_gpu_reset(pcmon_gpu_t *gpu);
+
+void pcmon_ark_reset(pcmon_ark_t *ark);
 
 bool pcmon_parse_status(const char *frame, pcmon_stats_t *out);
 
@@ -152,8 +172,10 @@ bool pcmon_parse_port_list(const char *frame, pcmon_port_list_t *out);
 
 bool pcmon_parse_gpu(const char *frame, pcmon_gpu_t *out);
 
+bool pcmon_parse_ark(const char *frame, pcmon_ark_t *out);
+
 // need is NULL for a plain request, otherwise PCMON_NEED_PROC / PCMON_NEED_PORT /
-// PCMON_NEED_GPU.
+// PCMON_NEED_GPU / PCMON_NEED_ARK.
 int pcmon_format_request(char *out, size_t n, const char *need, int sort);
 
 int pcmon_format_status(const pcmon_stats_t *stats, char *out, size_t n);
@@ -165,5 +187,7 @@ int pcmon_format_proc_list(const pcmon_proc_list_t *list, char *out, size_t n);
 int pcmon_format_port_list(const pcmon_port_list_t *list, char *out, size_t n);
 
 int pcmon_format_gpu(const pcmon_gpu_t *gpu, char *out, size_t n);
+
+int pcmon_format_ark(const pcmon_ark_t *ark, char *out, size_t n);
 
 int pcmon_level(float percent);

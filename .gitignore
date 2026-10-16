@@ -12,3 +12,5 @@ firmwares/*/tools/node_modules/
 # 发布助手（本地工具，不属于项目源码）
 publisher-skill/
 folotoy-ai-passport-publisher.zip
+
+ark_config.json

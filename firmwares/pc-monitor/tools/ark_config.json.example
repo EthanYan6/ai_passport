@@ -1,0 +1,16 @@
+{
+  "_说明1": "火山方舟 Coding Plan 用量配置。换了 key 只需修改下面 access_key / secret_key 两行并保存，桥接脚本会自动重新读取，无需重启、无需改代码。",
+  "_说明2": "密钥也可改用环境变量 VOLC_ACCESSKEY / VOLC_SECRETKEY（环境变量优先级高于本文件）。",
+  "_说明3": "title_tag 是页面大标题，太长会自动缩小字号；中文标题仅限固件字体里已有的字（火山方舟用量近周月时后重置获取失败配置小闫连不上），生僻字会显示方框。plan_tag / name_tag 同理。",
+  "access_key": "",
+  "secret_key": "",
+  "region": "cn-beijing",
+  "service": "ark",
+  "host": "ark.cn-beijing.volcengineapi.com",
+  "api_action": "GetCodingPlanUsage",
+  "api_version": "2024-01-01",
+  "cache_seconds": 120,
+  "title_tag": "Coding Plan",
+  "plan_tag": "pro",
+  "name_tag": "小闫连不上"
+}

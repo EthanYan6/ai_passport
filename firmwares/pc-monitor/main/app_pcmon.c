@@ -33,12 +33,13 @@ LV_FONT_DECLARE(app_font_40);
 #define PCMON_HIST 16
 #define PCMON_EVENT_DEPTH 8
 
-#define PCMON_PAGES 11
+#define PCMON_PAGES 12
 
 // View indices for pages that need extra data from the host agent.
 #define PCMON_VIEW_GPU 7
 #define PCMON_VIEW_PROC 8
 #define PCMON_VIEW_PORT 9
+#define PCMON_VIEW_ARK 10
 #define PCMON_PROC_ROWS PCMON_PROC_MAX
 #define PCMON_PORT_ROWS PCMON_PORT_MAX
 
@@ -53,7 +54,8 @@ LV_FONT_DECLARE(app_font_40);
 #define C_RED 0xFF4D6D
 
 static const char *const PAGE_NAMES[PCMON_PAGES] = {
-    "核心", "CPU", "内存", "磁盘", "网络", "趋势", "系统", "显卡", "进程", "端口", "代理"};
+    "核心", "CPU", "内存", "磁盘", "网络", "趋势", "系统", "显卡", "进程", "端口", "火山",
+    "代理"};
 
 typedef enum {
     PCMON_EV_LINE,
@@ -73,6 +75,8 @@ static pcmon_agent_t s_agent;
 static pcmon_proc_list_t s_proc_list;
 static pcmon_port_list_t s_port_list;
 static pcmon_gpu_t s_gpu;
+static pcmon_ark_t s_ark;
+static int64_t s_ark_rx_ms;
 static int64_t s_last_rx_ms;
 static int64_t s_last_agent_ms;
 static int s_rx_frames;
@@ -156,6 +160,14 @@ static lv_obj_t *s_proc_mem[PCMON_PROC_ROWS];
 static lv_obj_t *s_port_hdr_val;
 static lv_obj_t *s_port_num[PCMON_PORT_ROWS];
 static lv_obj_t *s_port_proc[PCMON_PORT_ROWS];
+
+static lv_obj_t *s_ark_plan_chip;
+static lv_obj_t *s_ark_name_chip;
+static lv_obj_t *s_ark_title;
+static lv_obj_t *s_ark_reset[PCMON_ARK_WINDOWS];
+static lv_obj_t *s_ark_bar[PCMON_ARK_WINDOWS];
+static lv_obj_t *s_ark_pct[PCMON_ARK_WINDOWS];
+static lv_obj_t *s_ark_detail[PCMON_ARK_WINDOWS];
 
 static uint32_t level_color(int level)
 {
@@ -501,6 +513,54 @@ static void build_port(lv_obj_t *p)
     }
 }
 
+// A small rounded tag with a 1px outline; returns the inner label so its text
+// can be updated (plan / name tags come from the bridge config).
+static lv_obj_t *make_chip(lv_obj_t *parent, const char *text, int x, int y, int w,
+                           uint32_t color)
+{
+    lv_obj_t *chip = lv_obj_create(parent);
+    lv_obj_set_size(chip, w, 22);
+    lv_obj_set_pos(chip, x, y);
+    lv_obj_set_style_bg_opa(chip, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(chip, 1, 0);
+    lv_obj_set_style_border_color(chip, lv_color_hex(color), 0);
+    lv_obj_set_style_radius(chip, 4, 0);
+    lv_obj_set_style_pad_all(chip, 0, 0);
+    lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *lbl = make_label(chip, text, &app_font_14, color);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+    return lbl;
+}
+
+// The big title must stop short of the top-bar battery label (right aligned
+// at x=230, ~40px wide worst case) so keep its right edge at/below x=190.
+#define ARK_TITLE_W_MAX 180
+
+static void build_ark(lv_obj_t *p)
+{
+    static const char *const win_titles[PCMON_ARK_WINDOWS] = {
+        "近5小时用量", "近一周用量", "近一月用量"};
+
+    s_ark_title = put_label(p, "Coding Plan", 10, 0, &lv_font_montserrat_40, C_TEXT);
+    lv_obj_set_width(s_ark_title, ARK_TITLE_W_MAX);
+    lv_label_set_long_mode(s_ark_title, LV_LABEL_LONG_DOT);
+
+    make_chip(p, "火山方舟", 10, 50, 68, C_CYAN);
+    s_ark_plan_chip = make_chip(p, "--", 86, 50, 44, C_AMBER);
+    s_ark_name_chip = make_chip(p, "--", 138, 50, 92, C_TEXT);
+
+    for (int i = 0; i < PCMON_ARK_WINDOWS; i++) {
+        int y = 86 + i * 58;
+        put_label(p, win_titles[i], 10, y, &app_font_14, C_MUTED);
+        s_ark_reset[i] = make_label(p, "--", &app_font_14, C_CYAN);
+        lv_obj_align(s_ark_reset[i], LV_ALIGN_TOP_RIGHT, -10, y);
+        s_ark_bar[i] = make_bar(p, 10, y + 22, 148, 12, C_CYAN);
+        s_ark_pct[i] = put_label(p, "--", 166, y + 21, &lv_font_montserrat_14, C_TEXT);
+        s_ark_detail[i] = put_label(p, "--", 10, y + 40, &app_font_14, C_MUTED);
+    }
+}
+
 static void build_ui(void)
 {
     s_scr = lv_obj_create(NULL);
@@ -559,7 +619,8 @@ static void build_ui(void)
     build_gpu(s_page[7]);
     build_proc(s_page[8]);
     build_port(s_page[9]);
-    build_agent(s_page[10]);
+    build_ark(s_page[10]);
+    build_agent(s_page[11]);
 
     s_hint = put_label(s_scr, "UP/DN page  OK:req  HOLD:pause", 12, 298,
                        &lv_font_montserrat_14, C_MUTED);
@@ -935,6 +996,98 @@ static void render_port(void)
     }
 }
 
+static void render_ark(void)
+{
+    bool ok = s_ark.valid && s_ark.err == 0;
+
+    // Title comes from the bridge config (key "t"); fall back to the default.
+    // Pick the 40px font when it fits within ARK_TITLE_W_MAX, else drop to
+    // 20px (shifted down to stay in the same band above the chips). Pure
+    // ASCII titles use the montserrat fonts, CJK ones the app fonts.
+    const char *title = s_ark.title[0] ? s_ark.title : "Coding Plan";
+    bool ascii = true;
+    for (const char *q = title; *q; q++) {
+        if ((unsigned char)*q >= 0x80) {
+            ascii = false;
+            break;
+        }
+    }
+    // Pick the largest font whose measured width fits the limit. Chinese
+    // titles have no 28px subset font, so they fall back 40 -> 20 directly.
+    const lv_font_t *cands[3];
+    int n = 0;
+    if (ascii) {
+        cands[n++] = &lv_font_montserrat_40;
+        cands[n++] = &lv_font_montserrat_28;
+        cands[n++] = &lv_font_montserrat_20;
+    } else {
+        cands[n++] = &app_font_40;
+        cands[n++] = &app_font_20;
+    }
+    const lv_font_t *font = cands[n - 1];
+    for (int i = 0; i < n; i++) {
+        lv_point_t size;
+        lv_text_get_size(&size, title, cands[i], 0, 0, LV_COORD_MAX,
+                         LV_TEXT_FLAG_EXPAND);
+        if (size.x <= ARK_TITLE_W_MAX) {
+            font = cands[i];
+            break;
+        }
+    }
+    // Vertically center the title in the ~46px band above the chips row.
+    int title_y = (46 - (int)font->line_height) / 2;
+    if (title_y < 0) {
+        title_y = 0;
+    }
+    lv_obj_set_style_text_font(s_ark_title, font, 0);
+    lv_obj_set_y(s_ark_title, title_y);
+    lv_label_set_text(s_ark_title, title);
+
+    lv_label_set_text(s_ark_plan_chip, s_ark.plan[0] ? s_ark.plan : "--");
+    lv_label_set_text(s_ark_name_chip, s_ark.name[0] ? s_ark.name : "--");
+    int64_t now = esp_timer_get_time() / 1000;
+    long elapsed = s_ark.valid ? (long)((now - s_ark_rx_ms) / 1000) : 0;
+    for (int i = 0; i < PCMON_ARK_WINDOWS; i++) {
+        bool has = ok && s_ark.has_win[i] && s_ark.quota[i] > 0.0f;
+        if (has) {
+            float pct = s_ark.used[i] * 100.0f / s_ark.quota[i];
+            int v = clamp100(pct);
+            lv_bar_set_value(s_ark_bar[i], v, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(s_ark_bar[i],
+                lv_color_hex(level_color(pcmon_level(pct))), LV_PART_INDICATOR);
+            lv_label_set_text_fmt(s_ark_pct[i], "%d", v);
+            long remain = s_ark.reset_s[i] - elapsed;
+            if (remain < 0) {
+                remain = 0;
+            }
+            if (remain >= 86400) {
+                label_printf(s_ark_reset[i], "%ldd%ldh后重置", remain / 86400,
+                             (remain % 86400) / 3600);
+            } else if (remain >= 3600) {
+                label_printf(s_ark_reset[i], "%ldh%ldm后重置", remain / 3600,
+                             (remain % 3600) / 60);
+            } else {
+                label_printf(s_ark_reset[i], "%ldm后重置", remain / 60);
+            }
+            label_printf(s_ark_detail[i], "%.0f / %.0f", (double)s_ark.used[i],
+                         (double)s_ark.quota[i]);
+        } else {
+            lv_bar_set_value(s_ark_bar[i], 0, LV_ANIM_OFF);
+            lv_label_set_text(s_ark_pct[i], "--");
+            lv_label_set_text(s_ark_reset[i], "--");
+            const char *msg = "--";
+            if (s_ark.valid) {
+                if (s_ark.err == 1) {
+                    msg = "未配置";
+                } else if (s_ark.err == 2) {
+                    msg = "获取失败";
+                }
+            }
+            lv_label_set_text(s_ark_detail[i], msg);
+        }
+    }
+}
+
 static void render(void)
 {
     if (!s_scr) {
@@ -988,6 +1141,7 @@ static void render(void)
     render_gpu();
     render_proc();
     render_port();
+    render_ark();
     render_agent();
 }
 
@@ -1035,6 +1189,8 @@ static void request_now(void)
         need = PCMON_NEED_PROC;
     } else if (s_view == PCMON_VIEW_PORT) {
         need = PCMON_NEED_PORT;
+    } else if (s_view == PCMON_VIEW_ARK) {
+        need = PCMON_NEED_ARK;
     }
     char req[40];
     if (pcmon_format_request(req, sizeof(req), need, s_proc_sort) > 0) {
@@ -1070,6 +1226,14 @@ static bool handle_event(const pcmon_ev_t *ev)
         pcmon_port_list_t ports;
         if (pcmon_parse_port_list(ev->line, &ports)) {
             s_port_list = ports;
+            s_rx_frames++;
+            return true;
+        }
+
+        pcmon_ark_t ark;
+        if (pcmon_parse_ark(ev->line, &ark)) {
+            s_ark = ark;
+            s_ark_rx_ms = esp_timer_get_time() / 1000;
             s_rx_frames++;
             return true;
         }
@@ -1159,9 +1323,11 @@ bool app_pcmon_start(void)
     pcmon_proc_list_reset(&s_proc_list);
     pcmon_port_list_reset(&s_port_list);
     pcmon_gpu_reset(&s_gpu);
+    pcmon_ark_reset(&s_ark);
     s_proc_sort = 0;
     s_last_rx_ms = esp_timer_get_time() / 1000;
     s_last_agent_ms = s_last_rx_ms;
+    s_ark_rx_ms = s_last_rx_ms;
 
     s_queue = xQueueCreate(PCMON_EVENT_DEPTH, sizeof(pcmon_ev_t));
     if (!s_queue) {

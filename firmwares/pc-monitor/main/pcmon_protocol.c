@@ -9,6 +9,7 @@
 #define PCMON_PROC_PREFIX "$PCPROC,"
 #define PCMON_PORT_PREFIX "$PCPORT,"
 #define PCMON_GPU_PREFIX "$PCGPU,"
+#define PCMON_ARK_PREFIX "$PCARK,"
 
 void pcmon_stats_reset(pcmon_stats_t *stats)
 {
@@ -40,6 +41,14 @@ void pcmon_gpu_reset(pcmon_gpu_t *gpu)
         return;
     }
     memset(gpu, 0, sizeof(*gpu));
+}
+
+void pcmon_ark_reset(pcmon_ark_t *ark)
+{
+    if (!ark) {
+        return;
+    }
+    memset(ark, 0, sizeof(*ark));
 }
 
 static void copy_field(char *dst, size_t n, const char *src, size_t len)
@@ -453,6 +462,88 @@ bool pcmon_parse_gpu(const char *frame, pcmon_gpu_t *out)
     return true;
 }
 
+// Ark window keys are two characters: the window (h = 5 hours, w = week,
+// m = month) followed by the field (q = quota, u = used, r = reset seconds).
+static int ark_window_index(char c)
+{
+    switch (c) {
+    case 'h':
+        return 0;
+    case 'w':
+        return 1;
+    case 'm':
+        return 2;
+    default:
+        return -1;
+    }
+}
+
+bool pcmon_parse_ark(const char *frame, pcmon_ark_t *out)
+{
+    if (!frame || !out) {
+        return false;
+    }
+    const char *start = strstr(frame, PCMON_ARK_PREFIX);
+    if (!start) {
+        return false;
+    }
+    const char *p = start + strlen(PCMON_ARK_PREFIX);
+    const char *end = strchr(p, '#');
+    if (!end) {
+        return false;
+    }
+
+    pcmon_ark_t ark;
+    pcmon_ark_reset(&ark);
+
+    while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        const char *tok_end = comma ? comma : end;
+        const char *eq = memchr(p, '=', (size_t)(tok_end - p));
+        if (eq) {
+            const char *key = p;
+            size_t klen = (size_t)(eq - p);
+            const char *val = eq + 1;
+            size_t vlen = (size_t)(tok_end - val);
+            if (key_is(key, klen, "err")) {
+                ark.err = (int)strtol(val, NULL, 10);
+            } else if (key_is(key, klen, "t")) {
+                copy_field(ark.title, sizeof(ark.title), val, vlen);
+            } else if (key_is(key, klen, "plan")) {
+                copy_field(ark.plan, sizeof(ark.plan), val, vlen);
+            } else if (key_is(key, klen, "name")) {
+                copy_field(ark.name, sizeof(ark.name), val, vlen);
+            } else if (klen == 2) {
+                int win = ark_window_index(key[0]);
+                if (win >= 0) {
+                    switch (key[1]) {
+                    case 'q':
+                        ark.quota[win] = (float)strtod(val, NULL);
+                        ark.has_win[win] = true;
+                        break;
+                    case 'u':
+                        ark.used[win] = (float)strtod(val, NULL);
+                        break;
+                    case 'r':
+                        ark.reset_s[win] = strtol(val, NULL, 10);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+            }
+        }
+        if (!comma) {
+            break;
+        }
+        p = comma + 1;
+    }
+
+    ark.valid = true;
+    *out = ark;
+    return true;
+}
+
 int pcmon_format_request(char *out, size_t n, const char *need, int sort)
 {
     if (!out || n == 0) {
@@ -684,6 +775,53 @@ int pcmon_format_gpu(const pcmon_gpu_t *gpu, char *out, size_t n)
     PCMON_GPU_APP("#\n");
 
 #undef PCMON_GPU_APP
+
+    return off;
+}
+
+int pcmon_format_ark(const pcmon_ark_t *ark, char *out, size_t n)
+{
+    if (!ark || !out || n == 0) {
+        return -1;
+    }
+    static const char win_prefix[PCMON_ARK_WINDOWS] = {'h', 'w', 'm'};
+
+    int off = 0;
+    int r = snprintf(out, n, "%serr=%d", PCMON_ARK_PREFIX, ark->err);
+    if (r < 0 || (size_t)r >= n) {
+        return -1;
+    }
+    off = r;
+
+#define PCMON_ARK_APP(...)                                                  \
+    do {                                                                    \
+        r = snprintf(out + off, n - (size_t)off, __VA_ARGS__);              \
+        if (r < 0 || (size_t)r >= n - (size_t)off) {                        \
+            return -1;                                                      \
+        }                                                                   \
+        off += r;                                                           \
+    } while (0)
+
+    if (ark->title[0]) {
+        PCMON_ARK_APP(",t=%s", ark->title);
+    }
+    if (ark->plan[0]) {
+        PCMON_ARK_APP(",plan=%s", ark->plan);
+    }
+    if (ark->name[0]) {
+        PCMON_ARK_APP(",name=%s", ark->name);
+    }
+    for (int i = 0; i < PCMON_ARK_WINDOWS; i++) {
+        if (!ark->has_win[i]) {
+            continue;
+        }
+        PCMON_ARK_APP(",%cq=%.1f,%cu=%.1f,%cr=%ld", win_prefix[i],
+                      (double)ark->quota[i], win_prefix[i],
+                      (double)ark->used[i], win_prefix[i], ark->reset_s[i]);
+    }
+    PCMON_ARK_APP("#\n");
+
+#undef PCMON_ARK_APP
 
     return off;
 }

@@ -70,6 +70,8 @@ int main(void)
     assert(strcmp(req, "$REQ,need=port,sort=0#\n") == 0);
     assert(pcmon_format_request(req, sizeof(req), PCMON_NEED_GPU, 0) > 0);
     assert(strcmp(req, "$REQ,need=gpu,sort=0#\n") == 0);
+    assert(pcmon_format_request(req, sizeof(req), PCMON_NEED_ARK, 0) > 0);
+    assert(strcmp(req, "$REQ,need=ark,sort=0#\n") == 0);
 
     char af[64];
     assert(pcmon_format_agent(1, af, sizeof(af)) > 0);
@@ -242,6 +244,73 @@ int main(void)
     assert(gin.has_vram && gin.vram_total_mb > 6143.5f);
     assert(gin.has_temp && gin.temp > 54.9f);
     assert(!gin.has_fan && !gin.has_power);
+
+    const char *ark_frame =
+        "$PCARK,err=0,t=Coding Plan,plan=Pro,name=闫玉良,"
+        "hq=25000.0,hu=1234.5,hr=16200,"
+        "wq=87500.0,wu=500.0,wr=432000,"
+        "mq=250000.0,mu=12000.0,mr=1209600#\n";
+    pcmon_ark_t ark;
+    assert(pcmon_parse_ark(ark_frame, &ark));
+    assert(ark.valid && ark.err == 0);
+    assert(strcmp(ark.title, "Coding Plan") == 0);
+    assert(strcmp(ark.plan, "Pro") == 0);
+    assert(strcmp(ark.name, "闫玉良") == 0);
+    assert(ark.has_win[0] && ark.has_win[1] && ark.has_win[2]);
+    assert(ark.quota[0] > 24999.0f && ark.used[0] > 1234.4f && ark.used[0] < 1234.6f);
+    assert(ark.reset_s[0] == 16200);
+    assert(ark.quota[1] > 87499.0f && ark.used[1] > 499.9f && ark.reset_s[1] == 432000);
+    assert(ark.quota[2] > 249999.0f && ark.used[2] > 11999.0f && ark.reset_s[2] == 1209600);
+
+    // Error frames still carry the tags; windows stay absent.
+    pcmon_ark_t aerr;
+    assert(pcmon_parse_ark("$PCARK,err=1,t=Coding Plan,name=闫玉良#", &aerr));
+    assert(aerr.valid && aerr.err == 1);
+    assert(strcmp(aerr.title, "Coding Plan") == 0);
+    assert(strcmp(aerr.name, "闫玉良") == 0);
+    assert(!aerr.has_win[0] && !aerr.has_win[1] && !aerr.has_win[2]);
+
+    // A title longer than the buffer is truncated, not overflowing.
+    pcmon_ark_t along;
+    assert(pcmon_parse_ark(
+        "$PCARK,err=0,t=0123456789012345678901234567890123456789#", &along));
+    assert(strlen(along.title) == PCMON_ARK_TITLE_MAX - 1);
+
+    // An ark frame must not be mistaken for the other frame types, and vice versa.
+    assert(!pcmon_parse_status(ark_frame, &not_stats));
+    assert(!pcmon_parse_proc_list(ark_frame, &pl));
+    assert(!pcmon_parse_port_list(ark_frame, &po));
+    assert(!pcmon_parse_gpu(ark_frame, &g));
+    assert(!pcmon_parse_ark(gpu_frame, &ark));
+    assert(!pcmon_parse_ark(proc_frame, &ark));
+    assert(!pcmon_parse_ark(port_frame, &ark));
+
+    pcmon_ark_t aout;
+    pcmon_ark_reset(&aout);
+    aout.valid = true;
+    snprintf(aout.title, sizeof(aout.title), "Coding Plan");
+    snprintf(aout.plan, sizeof(aout.plan), "Pro");
+    snprintf(aout.name, sizeof(aout.name), "闫玉良");
+    aout.has_win[0] = true;
+    aout.quota[0] = 25000.0f;
+    aout.used[0] = 1234.5f;
+    aout.reset_s[0] = 16200;
+    aout.has_win[2] = true;
+    aout.quota[2] = 250000.0f;
+    aout.used[2] = 12000.0f;
+    aout.reset_s[2] = 1209600;
+    char abuf[PCMON_LINE_MAX];
+    assert(pcmon_format_ark(&aout, abuf, sizeof(abuf)) > 0);
+    pcmon_ark_t ain;
+    assert(pcmon_parse_ark(abuf, &ain));
+    assert(ain.valid && ain.err == 0);
+    assert(strcmp(ain.title, "Coding Plan") == 0);
+    assert(strcmp(ain.plan, "Pro") == 0);
+    assert(strcmp(ain.name, "闫玉良") == 0);
+    assert(ain.has_win[0] && !ain.has_win[1] && ain.has_win[2]);
+    assert(ain.quota[0] > 24999.0f && ain.used[0] > 1234.4f && ain.used[0] < 1234.6f);
+    assert(ain.reset_s[0] == 16200);
+    assert(ain.quota[2] > 249999.0f && ain.reset_s[2] == 1209600);
 
     assert(pcmon_level(10.0f) == 0);
     assert(pcmon_level(75.0f) == 1);

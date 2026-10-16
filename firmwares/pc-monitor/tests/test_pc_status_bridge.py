@@ -70,11 +70,11 @@ class FrameTest(unittest.TestCase):
     def test_agent_frame_reports_psutil(self):
         with patch.object(BRIDGE, "psutil", object()):
             self.assertEqual(
-                BRIDGE.build_agent_frame(), b"$PCAGENT,ver=4,psutil=1#\n"
+                BRIDGE.build_agent_frame(), b"$PCAGENT,ver=5,psutil=1#\n"
             )
         with patch.object(BRIDGE, "psutil", None):
             self.assertEqual(
-                BRIDGE.build_agent_frame(), b"$PCAGENT,ver=4,psutil=0#\n"
+                BRIDGE.build_agent_frame(), b"$PCAGENT,ver=5,psutil=0#\n"
             )
 
     def test_proc_frame(self):
@@ -88,6 +88,154 @@ class FrameTest(unittest.TestCase):
     def test_gpu_frame(self):
         frame = BRIDGE.build_gpu_frame([("v", "nvidia"), ("u", "23.0")])
         self.assertEqual(frame, b"$PCGPU,v=nvidia,u=23.0#\n")
+
+
+class ArkFrameTest(unittest.TestCase):
+    def test_frame_is_utf8_for_chinese_name(self):
+        frame = BRIDGE.build_ark_frame(
+            [("err", "0"), ("plan", "Pro"), ("name", "闫玉良"), ("hq", "10.0")]
+        )
+        self.assertEqual(
+            frame, "$PCARK,err=0,plan=Pro,name=闫玉良,hq=10.0#\n".encode("utf-8")
+        )
+
+    def test_sanitize_utf8_truncates_by_bytes_without_splitting(self):
+        # 闫玉良 is 9 bytes; a 4-byte budget must keep only 闫 (3 bytes).
+        self.assertEqual(BRIDGE.sanitize_utf8("闫玉良", 4), "闫")
+        self.assertEqual(BRIDGE.sanitize_utf8("闫玉良", 15), "闫玉良")
+        self.assertEqual(BRIDGE.sanitize_utf8("a,b#c", 15), "a_b_c")
+
+    def test_need_ark_request_parses(self):
+        self.assertEqual(BRIDGE.parse_request(b"$REQ,need=ark#"), ("ark", 0))
+
+
+class ArkUsageSamplerTest(unittest.TestCase):
+    def _write_config(self, directory: str, data: dict) -> str:
+        import json
+
+        path = Path(directory) / "ark_config.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def test_missing_config_reports_not_configured(self):
+        sampler = BRIDGE.ArkUsageSampler("no/such/ark_config.json")
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(sampler.sample(), [("err", "1")])
+
+    def test_empty_keys_report_not_configured_but_keep_tags(self):
+        with tempfile.TemporaryDirectory(prefix="ark-tests-") as directory:
+            path = self._write_config(
+                directory,
+                {"title_tag": "Coding Plan", "plan_tag": "Pro", "name_tag": "闫玉良"},
+            )
+            sampler = BRIDGE.ArkUsageSampler(path)
+            with patch.dict("os.environ", {}, clear=True):
+                fields = sampler.sample()
+        self.assertEqual(
+            fields,
+            [("err", "1"), ("t", "Coding Plan"), ("plan", "Pro"), ("name", "闫玉良")],
+        )
+
+    def test_static_fields_title_sanitized_and_byte_capped(self):
+        static = BRIDGE.ArkUsageSampler._static_fields(
+            {"title_tag": "a,b#c" + "x" * 40}
+        )
+        self.assertEqual(static, [("t", "a_b_c" + "x" * 26)])
+
+    def test_fields_from_payload(self):
+        import time
+
+        now_ms = time.time() * 1000.0
+        payload = {
+            "Result": {
+                "PlanType": "Pro",
+                "AFPFiveHour": {
+                    "Quota": 25000,
+                    "Used": 1234.5,
+                    "ResetTime": now_ms + 600_000,
+                },
+                "AFPWeekly": {"Quota": 87500, "Used": 500},
+                "AFPMonthly": {"Quota": 250000, "Used": 12000, "ResetTime": 0},
+            }
+        }
+        sampler = BRIDGE.ArkUsageSampler("unused")
+        fields = dict(sampler._fields_from_payload(payload, []))
+        self.assertEqual(fields["err"], "0")
+        self.assertEqual(fields["plan"], "Pro")
+        self.assertEqual(fields["hq"], "25000.0")
+        self.assertEqual(fields["hu"], "1234.5")
+        self.assertTrue(590 <= int(fields["hr"]) <= 600)
+        self.assertEqual(fields["wq"], "87500.0")
+        self.assertEqual(fields["wu"], "500.0")
+        self.assertNotIn("wr", fields)  # no ResetTime -> no reset field
+        self.assertEqual(fields["mr"], "0")  # past reset clamps to 0
+
+    def test_static_plan_tag_overrides_api_plan(self):
+        payload = {"Result": {"PlanType": "Pro", "AFPWeekly": {"Quota": 1}}}
+        sampler = BRIDGE.ArkUsageSampler("unused")
+        static = BRIDGE.ArkUsageSampler._static_fields({"plan_tag": "Team"})
+        fields = dict(sampler._fields_from_payload(payload, static))
+        self.assertEqual(fields["plan"], "Team")
+
+    def test_signed_headers_shape(self):
+        import datetime
+
+        config = {
+            "access_key": "AKTEST",
+            "secret_key": "SKTEST",
+        }
+        sampler = BRIDGE.ArkUsageSampler("unused")
+        moment = datetime.datetime(2024, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+        headers = sampler._signed_headers(config, b"{}", now=moment)
+        self.assertEqual(headers["Host"], "ark.cn-beijing.volces.com")
+        self.assertEqual(headers["X-Date"], "20240102T030405Z")
+        self.assertEqual(
+            headers["X-Content-Sha256"],
+            "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+        )
+        auth = headers["Authorization"]
+        self.assertTrue(
+            auth.startswith(
+                "HMAC-SHA256 Credential=AKTEST/20240102/cn-beijing/ark/request, "
+                "SignedHeaders=host;x-content-sha256;x-date, Signature="
+            )
+        )
+        signature = auth.rsplit("Signature=", 1)[1]
+        self.assertEqual(len(signature), 64)
+        int(signature, 16)  # must be hex
+
+    def test_signed_headers_empty_without_keys(self):
+        sampler = BRIDGE.ArkUsageSampler("unused")
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(sampler._signed_headers({}, b"{}"), {})
+
+    def test_env_keys_override_file(self):
+        with patch.dict(
+            "os.environ",
+            {"VOLC_ACCESSKEY": "ENV_AK", "VOLC_SECRETKEY": "ENV_SK"},
+        ):
+            ak, sk = BRIDGE.ArkUsageSampler._keys(
+                {"access_key": "FILE_AK", "secret_key": "FILE_SK"}
+            )
+        self.assertEqual((ak, sk), ("ENV_AK", "ENV_SK"))
+
+    def test_fetch_error_reports_err2_with_tags(self):
+        with tempfile.TemporaryDirectory(prefix="ark-tests-") as directory:
+            path = self._write_config(
+                directory,
+                {
+                    "access_key": "AK",
+                    "secret_key": "SK",
+                    "name_tag": "闫玉良",
+                },
+            )
+            sampler = BRIDGE.ArkUsageSampler(path)
+            with patch.dict("os.environ", {}, clear=True):
+                with patch.object(
+                    sampler, "_fetch", side_effect=RuntimeError("boom")
+                ):
+                    fields = sampler.sample()
+        self.assertEqual(fields, [("err", "2"), ("name", "闫玉良")])
 
 
 class LhmSelectTest(unittest.TestCase):

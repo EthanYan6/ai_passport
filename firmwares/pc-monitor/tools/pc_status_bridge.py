@@ -10,14 +10,22 @@ port and answers each request with a status frame::
 It also announces itself with ``$PCAGENT,ver=4,psutil=1#`` on connect (and
 periodically) so the device can show whether the host agent is running.
 
-When the device is showing the process, port, or GPU page it appends
-``need=proc``, ``need=port``, or ``need=gpu`` (plus ``sort=0|1`` for the process
-page) to its request; the bridge then also answers with a top-N process list
-(``$PCPROC,...``), a listening-port list (``$PCPORT,...``), or a GPU summary
-(``$PCGPU,...``). Plain requests get the status frame only.
+When the device is showing the process, port, GPU, or Ark page it appends
+``need=proc``, ``need=port``, ``need=gpu``, or ``need=ark`` (plus ``sort=0|1``
+for the process page) to its request; the bridge then also answers with a top-N
+process list (``$PCPROC,...``), a listening-port list (``$PCPORT,...``), a GPU
+summary (``$PCGPU,...``), or Volcengine Ark Coding Plan usage (``$PCARK,...``).
+Plain requests get the status frame only.
 
 NVIDIA GPUs are read through ``nvidia-smi`` (no extra dependency); when it is
 absent the adapter name is read from WMI so the model is still shown.
+
+Ark usage comes from the ``GetCodingPlanUsage`` API (Coding Plan personal
+edition) with automatic fallback to ``GetAFPUsage`` (Agent Plan personal
+edition). Credentials and options live
+in ``ark_config.json`` next to this script, so rotating keys means editing that
+file only -- the bridge re-reads it automatically whenever the file changes.
+Environment variables ``VOLC_ACCESSKEY`` / ``VOLC_SECRETKEY`` override the file.
 
 Usage:
     pip install pyserial psutil
@@ -46,7 +54,10 @@ psutil is strongly recommended: without it only host, OS, and uptime are sent.
 from __future__ import annotations
 
 import argparse
+import datetime
 import getpass
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -73,13 +84,16 @@ except ImportError:  # pragma: no cover
     psutil = None
 
 ESP_VID = 0x303A
-PROTO_VER = 4
+PROTO_VER = 5
 PCMON_MAX_FIELD = 31
 PCMON_CORES_MAX = 8
 PCMON_PROC_MAX = 8
 PCMON_PORT_MAX = 8
 PCMON_NAME_MAX = 19  # PCMON_PROC_NAME_MAX minus the terminating NUL
 PCMON_GPU_NAME_MAX = 27  # PCMON_GPU_NAME_MAX minus the terminating NUL
+PCMON_ARK_PLAN_MAX = 11  # C PCMON_ARK_PLAN_MAX minus the terminating NUL
+PCMON_ARK_NAME_MAX = 15  # C PCMON_ARK_NAME_MAX minus the terminating NUL (bytes)
+PCMON_ARK_TITLE_MAX = 31  # C PCMON_ARK_TITLE_MAX minus the terminating NUL (bytes)
 AGENT_PERIOD_S = 5.0
 WRITE_TIMEOUT_S = 1.0
 APP_DIR_NAME = "FoloToy"
@@ -235,7 +249,20 @@ def sanitize(text: str, limit: int = PCMON_MAX_FIELD) -> str:
     )
 
 
-_NEED_RE = re.compile(r"need=(proc|port|gpu)")
+def sanitize_utf8(text: str, byte_limit: int) -> str:
+    """Sanitize then truncate to a byte budget without splitting a character.
+
+    The C parser copies frame fields into fixed byte buffers, so a Chinese
+    label such as the Ark name tag must be limited in UTF-8 bytes, not in
+    Python characters.
+    """
+    cleaned = sanitize(text, 64)
+    return cleaned.encode("utf-8", errors="ignore")[:byte_limit].decode(
+        "utf-8", errors="ignore"
+    )
+
+
+_NEED_RE = re.compile(r"need=(proc|port|gpu|ark)")
 _SORT_RE = re.compile(r"sort=(\d)")
 
 
@@ -529,6 +556,317 @@ class GpuSampler:
         return [("v", "other"), ("n", sanitize(name, PCMON_GPU_NAME_MAX))]
 
 
+class ArkUsageSampler:
+    """Fetch Volcengine Ark personal-plan usage.
+
+    Probes ``GetCodingPlanUsage`` (Coding Plan) first, then falls back to
+    ``GetAFPUsage`` (Agent Plan); whichever API returns real quota wins.
+
+    Credentials and options live in ``ark_config.json`` next to this script so
+    rotating keys means editing that file only; the file is re-read whenever
+    its mtime changes, so a running daemon picks edits up without a restart.
+    ``VOLC_ACCESSKEY`` / ``VOLC_SECRETKEY`` environment variables override the
+    file. Failures degrade to ``err=1`` (not configured) or ``err=2`` (fetch
+    failed) frames so the device page always has something to show.
+
+    ResetTime values arrive as millisecond epoch timestamps; they are turned
+    into seconds-until-reset before sending, because the device has no clock.
+    """
+
+    CONFIG_NAME = "ark_config.json"
+    FAIL_CACHE_S = 30.0
+    TIMEOUT_S = 8.0
+
+    _WINDOWS = (("AFPFiveHour", "h"), ("AFPWeekly", "w"), ("AFPMonthly", "m"))
+    # GetCodingPlanUsage QuotaUsage[].Level -> window prefix (session ~= 5h window)
+    _CODING_LEVELS = {"session": "h", "weekly": "w", "monthly": "m"}
+
+    def __init__(self, config_path: str | None = None) -> None:
+        self._path = config_path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), self.CONFIG_NAME
+        )
+        self._mtime: float | None = None
+        self._config: dict = {}
+        self._cache_fields: list[tuple[str, str]] | None = None
+        self._cache_until = 0.0
+        self._fingerprint = ""
+
+    # ------------------------------------------------------------- config --
+
+    def _load_config(self) -> dict:
+        try:
+            mtime = os.path.getmtime(self._path)
+        except OSError:
+            if self._mtime is not None:
+                self._mtime = None
+                self._config = {}
+            return self._config
+        if mtime != self._mtime:
+            try:
+                with open(self._path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                self._config = data if isinstance(data, dict) else {}
+            except (OSError, ValueError):
+                self._config = {}
+            self._mtime = mtime
+        return self._config
+
+    @staticmethod
+    def _keys(config: dict) -> tuple[str, str]:
+        ak = (
+            os.environ.get("VOLC_ACCESSKEY")
+            or str(config.get("access_key") or "")
+        ).strip()
+        sk = (
+            os.environ.get("VOLC_SECRETKEY")
+            or str(config.get("secret_key") or "")
+        ).strip()
+        return ak, sk
+
+    # -------------------------------------------------------------- signing --
+
+    @staticmethod
+    def _hmac_sha256(key: bytes, message: str) -> bytes:
+        return hmac.new(key, message.encode("utf-8"), hashlib.sha256).digest()
+
+    @staticmethod
+    def _sha256_hex(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _signed_headers(self, config: dict, body: bytes, now=None) -> dict:
+        """Volcengine V4 (HMAC-SHA256) request signing for POST /."""
+        ak, sk = self._keys(config)
+        if not ak or not sk:
+            return {}
+        region = str(config.get("region") or "cn-beijing")
+        service = str(config.get("service") or "ark")
+        host = str(config.get("host") or "ark.cn-beijing.volces.com")
+        action = str(config.get("api_action") or "GetAFPUsage")
+        version = str(config.get("api_version") or "2024-01-01")
+        moment = now or datetime.datetime.now(datetime.timezone.utc)
+        x_date = moment.strftime("%Y%m%dT%H%M%SZ")
+        short_date = x_date[:8]
+        payload_hash = self._sha256_hex(body)
+        canonical_headers = (
+            f"host:{host}\nx-content-sha256:{payload_hash}\nx-date:{x_date}\n"
+        )
+        signed_headers = "host;x-content-sha256;x-date"
+        canonical_request = "\n".join(
+            [
+                "POST",
+                "/",
+                f"Action={action}&Version={version}",
+                canonical_headers,
+                signed_headers,
+                payload_hash,
+            ]
+        )
+        credential_scope = f"{short_date}/{region}/{service}/request"
+        string_to_sign = "\n".join(
+            [
+                "HMAC-SHA256",
+                x_date,
+                credential_scope,
+                self._sha256_hex(canonical_request.encode("utf-8")),
+            ]
+        )
+        k_date = self._hmac_sha256(sk.encode("utf-8"), short_date)
+        k_region = self._hmac_sha256(k_date, region)
+        k_service = self._hmac_sha256(k_region, service)
+        k_signing = self._hmac_sha256(k_service, "request")
+        signature = hmac.new(
+            k_signing, string_to_sign.encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        authorization = (
+            f"HMAC-SHA256 Credential={ak}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={signature}"
+        )
+        return {
+            "Host": host,
+            "Content-Type": "application/json",
+            "X-Date": x_date,
+            "X-Content-Sha256": payload_hash,
+            "Authorization": authorization,
+        }
+
+    # -------------------------------------------------------------- fetching --
+
+    def _fetch(self, config: dict, action: str | None = None) -> dict:
+        body = b"{}"
+        cfg = config
+        if action and action != config.get("api_action"):
+            cfg = dict(config)
+            cfg["api_action"] = action
+        headers = self._signed_headers(cfg, body)
+        if not headers:
+            raise ValueError("ark credentials not configured")
+        action = str(cfg.get("api_action") or "GetAFPUsage")
+        version = str(cfg.get("api_version") or "2024-01-01")
+        url = f"https://{headers['Host']}/?Action={action}&Version={version}"
+        request = urllib.request.Request(
+            url, data=body, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=self.TIMEOUT_S) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    @staticmethod
+    def _num(value) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _static_fields(config: dict) -> list[tuple[str, str]]:
+        """title/plan/name tags from the config file; sent even on error frames."""
+        fields: list[tuple[str, str]] = []
+        title = str(config.get("title_tag") or "").strip()
+        if title:
+            fields.append(("t", sanitize_utf8(title, PCMON_ARK_TITLE_MAX)))
+        plan = str(config.get("plan_tag") or "").strip()
+        if plan:
+            fields.append(("plan", sanitize_utf8(plan, PCMON_ARK_PLAN_MAX)))
+        name = str(config.get("name_tag") or "").strip()
+        if name:
+            fields.append(("name", sanitize_utf8(name, PCMON_ARK_NAME_MAX)))
+        return fields
+
+    def _fields_from_payload(
+        self, payload: dict, static_fields: list[tuple[str, str]]
+    ) -> list[tuple[str, str]]:
+        result = payload.get("Result")
+        if not isinstance(result, dict):
+            result = payload if isinstance(payload, dict) else {}
+        fields: list[tuple[str, str]] = [("err", "0")]
+        fields.extend(static_fields)
+        if not any(key == "plan" for key, _ in static_fields):
+            plan = str(result.get("PlanType") or "").strip()
+            if plan:
+                fields.append(("plan", sanitize_utf8(plan, PCMON_ARK_PLAN_MAX)))
+        now_ms = time.time() * 1000.0
+        for key, prefix in self._WINDOWS:
+            window = result.get(key)
+            if not isinstance(window, dict):
+                continue
+            quota = self._num(window.get("Quota"))
+            if quota is None:
+                continue
+            used = self._num(window.get("Used")) or 0.0
+            fields.append((f"{prefix}q", f"{quota:.1f}"))
+            fields.append((f"{prefix}u", f"{used:.1f}"))
+            reset_ms = self._num(window.get("ResetTime"))
+            if reset_ms is not None:
+                remaining = max(0, int((reset_ms - now_ms) / 1000.0))
+                fields.append((f"{prefix}r", str(remaining)))
+        return fields
+
+    def _fields_from_coding_payload(
+        self, payload: dict, static_fields: list[tuple[str, str]]
+    ) -> list[tuple[str, str]] | None:
+        """Parse GetCodingPlanUsage. Returns None when the payload carries no
+        usable QuotaUsage (e.g. account has no Coding Plan), so the caller can
+        fall back to GetAFPUsage."""
+        result = payload.get("Result")
+        if not isinstance(result, dict):
+            result = payload if isinstance(payload, dict) else {}
+        quota_usage = result.get("QuotaUsage")
+        if not isinstance(quota_usage, list) or not quota_usage:
+            return None
+        fields: list[tuple[str, str]] = [("err", "0")]
+        fields.extend(static_fields)
+        now_s = time.time()
+        for item in quota_usage:
+            if not isinstance(item, dict):
+                continue
+            prefix = self._CODING_LEVELS.get(
+                str(item.get("Level") or "").strip().lower()
+            )
+            if not prefix:
+                continue
+            percent = self._num(item.get("Percent"))
+            if percent is None:
+                continue
+            cap = self._num(item.get("Cap"))
+            fields.append((f"{prefix}q", f"{(cap if cap is not None else 100.0):.1f}"))
+            fields.append((f"{prefix}u", f"{percent:.1f}"))
+            reset_s = self._num(item.get("ResetTimestamp"))
+            if reset_s is not None and reset_s > 0:
+                fields.append((f"{prefix}r", str(max(0, int(reset_s - now_s)))))
+        if not any(key.endswith("q") for key, _ in fields):
+            return None
+        return fields
+
+    # -------------------------------------------------------------- sampling --
+
+    def _query(self, config: dict) -> list[tuple[str, str]]:
+        static_fields = self._static_fields(config)
+        ak, sk = self._keys(config)
+        if not ak or not sk:
+            return [("err", "1")] + static_fields
+        # Probe the configured action first, then the other personal-plan API:
+        # GetCodingPlanUsage covers Coding Plan, GetAFPUsage covers Agent Plan.
+        primary = str(config.get("api_action") or "GetCodingPlanUsage")
+        order = [primary] + [
+            a for a in ("GetCodingPlanUsage", "GetAFPUsage") if a != primary
+        ]
+        logger = logging.getLogger("pcmon.bridge")
+        afp_fields: list[tuple[str, str]] | None = None
+        failed = False
+        for action in order:
+            try:
+                payload = self._fetch(config, action)
+            except Exception as exc:
+                failed = True
+                logger.warning("Ark usage fetch failed (%s): %s", action, exc)
+                continue
+            if action == "GetCodingPlanUsage":
+                fields = self._fields_from_coding_payload(payload, static_fields)
+                if fields:
+                    return fields
+                continue
+            fields = self._fields_from_payload(payload, static_fields)
+            has_quota = any(
+                key.endswith("q") and (self._num(value) or 0.0) > 0
+                for key, value in fields
+            )
+            if has_quota:
+                return fields
+            afp_fields = fields
+        if afp_fields is not None:
+            return afp_fields
+        if not failed:
+            logger.warning("Ark usage fetch returned no quota data")
+        return [("err", "2")] + static_fields
+
+    @staticmethod
+    def _cache_seconds(config: dict) -> float:
+        try:
+            return max(15.0, float(config.get("cache_seconds") or 120))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def sample(self) -> list[tuple[str, str]]:
+        config = self._load_config()
+        fingerprint = json.dumps(config, sort_keys=True, ensure_ascii=False)
+        now = time.monotonic()
+        if (
+            self._cache_fields is not None
+            and now < self._cache_until
+            and fingerprint == self._fingerprint
+        ):
+            return self._cache_fields
+        fields = self._query(config)
+        self._cache_fields = fields
+        self._fingerprint = fingerprint
+        cache_s = self._cache_seconds(config)
+        if dict(fields).get("err") != "0":
+            cache_s = min(cache_s, self.FAIL_CACHE_S)
+        self._cache_until = now + cache_s
+        return fields
+
+
 class Sampler:
     def __init__(self) -> None:
         self._last_net = None
@@ -541,6 +879,7 @@ class Sampler:
         self.cpu_model = sanitize(_cpu_model())
         self.lhm = LhmSensors()
         self.gpu = GpuSampler(self.lhm)
+        self.ark = ArkUsageSampler()
         self._prime_process_cpu()
 
     def _prime_process_cpu(self) -> None:
@@ -794,6 +1133,13 @@ def build_gpu_frame(fields: list[tuple[str, str]]) -> bytes:
     return f"$PCGPU,{body}#\n".encode("ascii", errors="ignore")
 
 
+def build_ark_frame(fields: list[tuple[str, str]]) -> bytes:
+    body = ",".join(f"{key}={value}" for key, value in fields)
+    # UTF-8 (not ASCII) so a Chinese name_tag reaches the device intact; the
+    # link layer is byte-transparent and the C parser copies raw bytes.
+    return f"$PCARK,{body}#\n".encode("utf-8", errors="ignore")
+
+
 def answer(sampler: Sampler, need: str | None, sort: int) -> bytes:
     payload = bytearray(build_frame(sampler.sample()))
     if need == "proc":
@@ -803,6 +1149,8 @@ def answer(sampler: Sampler, need: str | None, sort: int) -> bytes:
         payload += build_port_frame(items, established)
     elif need == "gpu":
         payload += build_gpu_frame(sampler.gpu.sample())
+    elif need == "ark":
+        payload += build_ark_frame(sampler.ark.sample())
     return bytes(payload)
 
 
