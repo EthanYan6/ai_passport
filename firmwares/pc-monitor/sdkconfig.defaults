@@ -1,0 +1,35 @@
+# --- 目标芯片 ---
+CONFIG_IDF_TARGET="esp32c3"
+# ESP32-C3 无 PSRAM
+
+# --- Flash 8MB ---
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_HEADER_FLASHSIZE_UPDATE=n
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# --- 控制台:USB-Serial-JTAG(C3 原生 USB,GPIO18/19)---
+# 不用 UART0:其默认 TX=GPIO21 与本板背光引脚冲突。
+# pcmon 协议经 stdin/stdout 与 PC 端 tools/pc_status_bridge.py 通信,依赖此控制台。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# --- LVGL ---
+CONFIG_LV_COLOR_DEPTH_16=y
+# 20 ms display refresh period targets up to 50 FPS when rendering and SPI
+# transfer complete within the same budget.
+CONFIG_LV_DEF_REFR_PERIOD=20
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_40=y
+# LVGL 内置 malloc 池大小(字节)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
+# 本固件 11 页仪表盘 UI,80KB 经 pc-monitor 工程验证足够。
+# 注意:LVGL 9.6 已废弃 LV_MEM_SIZE_KILOBYTES,必须直接配 LV_MEM_SIZE 字节数。
+CONFIG_LV_MEM_SIZE=81920
+
+# --- 系统 ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- 不用蓝牙(pcmon 应用不使用,关闭省 flash/RAM) ---
+CONFIG_BT_ENABLED=n
