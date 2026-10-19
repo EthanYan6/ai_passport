@@ -312,6 +312,71 @@ int main(void)
     assert(ain.reset_s[0] == 16200);
     assert(ain.quota[2] > 249999.0f && ain.reset_s[2] == 1209600);
 
+    // ---- TRAE status frames ($TSTAT) ----
+    pcmon_trae_t trae;
+    assert(!pcmon_parse_trae("plain text no frame", &trae));
+    assert(!pcmon_parse_trae("$TAPRV,id=1,t=x#", &trae));
+
+    const char *trae_full = "$TSTAT,st=code,task=12,rate=85,cm=42#\n";
+    assert(pcmon_parse_trae(trae_full, &trae));
+    assert(trae.valid && trae.st == PCMON_TRAE_CODE);
+    assert(trae.has_task && trae.task == 12);
+    assert(trae.has_rate && trae.rate == 85);
+    assert(trae.has_cm && trae.cm == 42);
+
+    // Partial frames only set the fields they carry.
+    assert(pcmon_parse_trae("$TSTAT,st=think#", &trae));
+    assert(trae.valid && trae.st == PCMON_TRAE_THINK);
+    assert(!trae.has_task && !trae.has_rate && !trae.has_cm);
+
+    // An empty state value still parses, defaulting to idle (the bridge always
+    // sends at least st=.., so a bare "$TSTAT#" is not part of the protocol).
+    assert(pcmon_parse_trae("$TSTAT,st=#", &trae));
+    assert(trae.valid && trae.st == PCMON_TRAE_IDLE);
+    assert(!trae.has_task && !trae.has_rate && !trae.has_cm);
+
+    // Unknown state strings fall back to idle.
+    assert(pcmon_parse_trae("$TSTAT,st=xyz,task=1#", &trae));
+    assert(trae.valid && trae.st == PCMON_TRAE_IDLE && trae.has_task);
+
+    // Every state keyword maps to its enum value.
+    assert(pcmon_parse_trae("$TSTAT,st=build#", &trae) && trae.st == PCMON_TRAE_BUILD);
+    assert(pcmon_parse_trae("$TSTAT,st=pass#", &trae) && trae.st == PCMON_TRAE_PASS);
+    assert(pcmon_parse_trae("$TSTAT,st=fail#", &trae) && trae.st == PCMON_TRAE_FAIL);
+
+    // A $TSTAT frame is not mistaken for other frame types.
+    pcmon_stats_t not_stats2;
+    assert(!pcmon_parse_status(trae_full, &not_stats2));
+    assert(!pcmon_parse_ark(trae_full, &ark));
+
+    // ---- TRAE approval frames ($TAPRV) ----
+    pcmon_trae_aprv_t ap;
+    assert(!pcmon_parse_trae_aprv("$TSTAT,st=code#", &ap));
+    assert(!pcmon_parse_trae_aprv("no frame here", &ap));
+
+    // clean_cmd turns ',' into ';' and drops '#', so the value may hold both,
+    // plus '=' (the parser takes the first '=' as the key/value separator).
+    assert(pcmon_parse_trae_aprv("$TAPRV,id=17,t=pytest; lr=0.01; 中文参数#", &ap));
+    assert(ap.valid && ap.id == 17);
+    assert(strcmp(ap.cmd, "pytest; lr=0.01; 中文参数") == 0);
+
+    // A command longer than the buffer is truncated, not overflowed.
+    char long_cmd[131];
+    memset(long_cmd, 'a', sizeof(long_cmd) - 1);
+    long_cmd[sizeof(long_cmd) - 1] = '\0';
+    char long_frame[192];
+    snprintf(long_frame, sizeof(long_frame), "$TAPRV,id=9,t=%s#", long_cmd);
+    assert(pcmon_parse_trae_aprv(long_frame, &ap));
+    assert(ap.valid && ap.id == 9);
+    assert(strlen(ap.cmd) == PCMON_TRAE_CMD_MAX - 1);
+
+    // ---- Device button frames ($TBTN) ----
+    char tbtn[32];
+    assert(pcmon_format_trae_btn(42, true, tbtn, sizeof(tbtn)) > 0);
+    assert(strcmp(tbtn, "$TBTN,id=42,r=allow#\n") == 0);
+    assert(pcmon_format_trae_btn(-3, false, tbtn, sizeof(tbtn)) > 0);
+    assert(strcmp(tbtn, "$TBTN,id=-3,r=deny#\n") == 0);
+
     assert(pcmon_level(10.0f) == 0);
     assert(pcmon_level(75.0f) == 1);
     assert(pcmon_level(95.0f) == 2);

@@ -10,6 +10,8 @@
 #define PCMON_PORT_PREFIX "$PCPORT,"
 #define PCMON_GPU_PREFIX "$PCGPU,"
 #define PCMON_ARK_PREFIX "$PCARK,"
+#define PCMON_TRAE_PREFIX "$TSTAT,"
+#define PCMON_TRAE_APRV_PREFIX "$TAPRV,"
 
 void pcmon_stats_reset(pcmon_stats_t *stats)
 {
@@ -51,6 +53,137 @@ void pcmon_ark_reset(pcmon_ark_t *ark)
     memset(ark, 0, sizeof(*ark));
 }
 
+void pcmon_trae_reset(pcmon_trae_t *trae)
+{
+    if (!trae) {
+        return;
+    }
+    memset(trae, 0, sizeof(*trae));
+}
+
+void pcmon_trae_aprv_reset(pcmon_trae_aprv_t *aprv)
+{
+    if (!aprv) {
+        return;
+    }
+    memset(aprv, 0, sizeof(*aprv));
+}
+
+// Defined below, needed by the TRAE parsers above the helpers' definitions.
+static void copy_field(char *dst, size_t n, const char *src, size_t len);
+static bool key_is(const char *key, size_t klen, const char *name);
+static bool val_is(const char *val, size_t vlen, const char *name);
+
+bool pcmon_parse_trae(const char *frame, pcmon_trae_t *out)
+{
+    if (!frame || !out) {
+        return false;
+    }
+    const char *start = strstr(frame, PCMON_TRAE_PREFIX);
+    if (!start) {
+        return false;
+    }
+    const char *p = start + strlen(PCMON_TRAE_PREFIX);
+    const char *end = strchr(p, '#');
+    if (!end) {
+        return false;
+    }
+
+    pcmon_trae_t trae;
+    pcmon_trae_reset(&trae);
+
+    while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        const char *tok_end = comma ? comma : end;
+        const char *eq = memchr(p, '=', (size_t)(tok_end - p));
+        if (eq) {
+            const char *key = p;
+            size_t klen = (size_t)(eq - p);
+            const char *val = eq + 1;
+            size_t vlen = (size_t)(tok_end - val);
+            if (key_is(key, klen, "st")) {
+                // Values are delimited by ',' / '#', not NUL, so the match
+                // must be exact-length (strncmp against the raw frame would
+                // never be equal).
+                if (val_is(val, vlen, "think")) {
+                    trae.st = PCMON_TRAE_THINK;
+                } else if (val_is(val, vlen, "code")) {
+                    trae.st = PCMON_TRAE_CODE;
+                } else if (val_is(val, vlen, "build")) {
+                    trae.st = PCMON_TRAE_BUILD;
+                } else if (val_is(val, vlen, "pass")) {
+                    trae.st = PCMON_TRAE_PASS;
+                } else if (val_is(val, vlen, "fail")) {
+                    trae.st = PCMON_TRAE_FAIL;
+                } else {
+                    trae.st = PCMON_TRAE_IDLE;
+                }
+            } else if (key_is(key, klen, "task")) {
+                trae.task = strtol(val, NULL, 10);
+                trae.has_task = true;
+            } else if (key_is(key, klen, "rate")) {
+                trae.rate = (int)strtol(val, NULL, 10);
+                trae.has_rate = true;
+            } else if (key_is(key, klen, "cm")) {
+                trae.cm = strtol(val, NULL, 10);
+                trae.has_cm = true;
+            }
+        }
+        if (!comma) {
+            break;
+        }
+        p = comma + 1;
+    }
+
+    trae.valid = true;
+    *out = trae;
+    return true;
+}
+
+bool pcmon_parse_trae_aprv(const char *frame, pcmon_trae_aprv_t *out)
+{
+    if (!frame || !out) {
+        return false;
+    }
+    const char *start = strstr(frame, PCMON_TRAE_APRV_PREFIX);
+    if (!start) {
+        return false;
+    }
+    const char *p = start + strlen(PCMON_TRAE_APRV_PREFIX);
+    const char *end = strchr(p, '#');
+    if (!end) {
+        return false;
+    }
+
+    pcmon_trae_aprv_t aprv;
+    pcmon_trae_aprv_reset(&aprv);
+
+    while (p < end) {
+        const char *comma = memchr(p, ',', (size_t)(end - p));
+        const char *tok_end = comma ? comma : end;
+        const char *eq = memchr(p, '=', (size_t)(tok_end - p));
+        if (eq) {
+            const char *key = p;
+            size_t klen = (size_t)(eq - p);
+            const char *val = eq + 1;
+            size_t vlen = (size_t)(tok_end - val);
+            if (key_is(key, klen, "id")) {
+                aprv.id = strtol(val, NULL, 10);
+            } else if (key_is(key, klen, "t")) {
+                copy_field(aprv.cmd, sizeof(aprv.cmd), val, vlen);
+            }
+        }
+        if (!comma) {
+            break;
+        }
+        p = comma + 1;
+    }
+
+    aprv.valid = true;
+    *out = aprv;
+    return true;
+}
+
 static void copy_field(char *dst, size_t n, const char *src, size_t len)
 {
     if (len >= n) {
@@ -63,6 +196,11 @@ static void copy_field(char *dst, size_t n, const char *src, size_t len)
 static bool key_is(const char *key, size_t klen, const char *name)
 {
     return strlen(name) == klen && strncmp(key, name, klen) == 0;
+}
+
+static bool val_is(const char *val, size_t vlen, const char *name)
+{
+    return strlen(name) == vlen && strncmp(val, name, vlen) == 0;
 }
 
 static int core_index(const char *key, size_t klen)
@@ -824,6 +962,14 @@ int pcmon_format_ark(const pcmon_ark_t *ark, char *out, size_t n)
 #undef PCMON_ARK_APP
 
     return off;
+}
+
+int pcmon_format_trae_btn(long id, bool allow, char *out, size_t n)
+{
+    if (!out || n == 0) {
+        return -1;
+    }
+    return snprintf(out, n, "$TBTN,id=%ld,r=%s#\n", id, allow ? "allow" : "deny");
 }
 
 int pcmon_level(float percent)

@@ -16,6 +16,7 @@
 #include "lvgl.h"
 #include "pcmon_link.h"
 #include "pcmon_protocol.h"
+#include "trae_avatar.h"
 
 static const char *TAG = "app_pcmon";
 
@@ -33,13 +34,20 @@ LV_FONT_DECLARE(app_font_40);
 #define PCMON_HIST 16
 #define PCMON_EVENT_DEPTH 8
 
-#define PCMON_PAGES 12
+// A pending approval stops being shown after the hook's own timeout has
+// passed (hook waits 110s inside a 120s budget); the bridge re-sends the
+// same $TAPRV on every poll, so expired ids must be skipped, not re-shown.
+#define PCMON_APRV_TTL_MS 120000
+#define PCMON_APRV_FB_MS 2000
+
+#define PCMON_PAGES 13
 
 // View indices for pages that need extra data from the host agent.
 #define PCMON_VIEW_GPU 7
 #define PCMON_VIEW_PROC 8
 #define PCMON_VIEW_PORT 9
 #define PCMON_VIEW_ARK 10
+#define PCMON_VIEW_TRAE 11
 #define PCMON_PROC_ROWS PCMON_PROC_MAX
 #define PCMON_PORT_ROWS PCMON_PORT_MAX
 
@@ -55,7 +63,7 @@ LV_FONT_DECLARE(app_font_40);
 
 static const char *const PAGE_NAMES[PCMON_PAGES] = {
     "核心", "CPU", "内存", "磁盘", "网络", "趋势", "系统", "显卡", "进程", "端口", "火山",
-    "代理"};
+    "战况", "代理"};
 
 typedef enum {
     PCMON_EV_LINE,
@@ -76,7 +84,15 @@ static pcmon_proc_list_t s_proc_list;
 static pcmon_port_list_t s_port_list;
 static pcmon_gpu_t s_gpu;
 static pcmon_ark_t s_ark;
+static pcmon_trae_t s_trae;
+static pcmon_trae_aprv_t s_aprv;
 static int64_t s_ark_rx_ms;
+static int64_t s_aprv_rx_ms;   // when the current $TAPRV id first arrived
+static long s_aprv_skip_id;    // id expired locally; ignore until a new one
+static bool s_aprv_allow;      // decision feedback: true = allowed
+static long s_aprv_done_id;    // id shown in the decision feedback
+static int64_t s_aprv_done_ms; // when the feedback started, 0 = none
+static int64_t s_av_frame_ms;  // avatar animation pacing
 static int64_t s_last_rx_ms;
 static int64_t s_last_agent_ms;
 static int s_rx_frames;
@@ -168,6 +184,19 @@ static lv_obj_t *s_ark_reset[PCMON_ARK_WINDOWS];
 static lv_obj_t *s_ark_bar[PCMON_ARK_WINDOWS];
 static lv_obj_t *s_ark_pct[PCMON_ARK_WINDOWS];
 static lv_obj_t *s_ark_detail[PCMON_ARK_WINDOWS];
+
+static lv_obj_t *s_trae_chip;      // status badge label
+static lv_obj_t *s_trae_chip_obj;  // status badge border container
+static lv_obj_t *s_trae_task;
+static lv_obj_t *s_trae_rate;
+static lv_obj_t *s_trae_rate_bar;
+static lv_obj_t *s_trae_cm;
+static lv_obj_t *s_trae_stats;    // separator + stat rows, hidden on approval
+static lv_obj_t *s_trae_aprv_box;
+static lv_obj_t *s_trae_aprv_id;
+static lv_obj_t *s_trae_aprv_cmd;
+static lv_obj_t *s_trae_aprv_hint;
+static lv_obj_t *s_trae_feedback;
 
 static uint32_t level_color(int level)
 {
@@ -529,7 +558,10 @@ static lv_obj_t *make_chip(lv_obj_t *parent, const char *text, int x, int y, int
     lv_obj_clear_flag(chip, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_clear_flag(chip, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *lbl = make_label(chip, text, &app_font_14, color);
-    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+    // Persistent alignment: the text is swapped at runtime and a one-shot
+    // lv_obj_align() would leave the label anchored at its old width's edge
+    // instead of staying centered in the chip.
+    lv_obj_set_align(lbl, LV_ALIGN_CENTER);
     return lbl;
 }
 
@@ -559,6 +591,97 @@ static void build_ark(lv_obj_t *p)
         s_ark_pct[i] = put_label(p, "--", 166, y + 21, &lv_font_montserrat_14, C_TEXT);
         s_ark_detail[i] = put_label(p, "--", 10, y + 40, &app_font_14, C_MUTED);
     }
+}
+
+// TRAE battle page: status badge above the large centered pixel companion.
+// Normally the lower half shows the stat rows; while an approval is pending
+// the whole lower half swaps to the full-screen command review (title,
+// wrapped command, then the button hint), with the sprite kept at full size.
+static void build_trae(lv_obj_t *p)
+{
+    s_trae_chip = make_chip(p, "已累瘫", 70, 2, 100, C_MUTED);
+    s_trae_chip_obj = lv_obj_get_parent(s_trae_chip);
+    lv_obj_set_size(s_trae_chip_obj, 100, 30);          // bigger badge
+    lv_obj_set_style_text_font(s_trae_chip, &app_font_20, 0);
+
+    trae_avatar_create(p, 70, 40, 10);  // 100px, centered: (240-100)/2 = 70
+
+    // Stat rows live in their own transparent container so a pending
+    // approval can hide them all at once.
+    s_trae_stats = make_container(p, 0, 148, 240, 114);
+
+    lv_obj_t *sep = lv_obj_create(s_trae_stats);
+    lv_obj_set_size(sep, 216, 1);
+    lv_obj_set_pos(sep, 12, 2);
+    lv_obj_set_style_bg_color(sep, lv_color_hex(C_FRAME), 0);
+    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(sep, 0, 0);
+    lv_obj_clear_flag(sep, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
+
+    put_label(s_trae_stats, "任务", 14, 10, &app_font_14, C_MUTED);
+    s_trae_task = put_label(s_trae_stats, "--", 74, 10, &app_font_14, C_TEXT);
+
+    put_label(s_trae_stats, "编码", 14, 34, &app_font_14, C_MUTED);
+    s_trae_cm = put_label(s_trae_stats, "--", 74, 34, &app_font_14, C_TEXT);
+
+    s_trae_feedback = put_label(s_trae_stats, "最近审批 --", 14, 58,
+                                &app_font_14, C_MUTED);
+
+    put_label(s_trae_stats, "通过率", 14, 82, &app_font_14, C_MUTED);
+    s_trae_rate_bar = make_bar(s_trae_stats, 74, 85, 130, 12, C_GREEN);
+    s_trae_rate = put_label(s_trae_stats, "--", 210, 82, &app_font_14, C_TEXT);
+
+    // Full-screen approval review: amber box spanning the lower page.
+    s_trae_aprv_box = lv_obj_create(p);
+    lv_obj_set_size(s_trae_aprv_box, 216, 110);
+    lv_obj_set_pos(s_trae_aprv_box, 12, 148);
+    lv_obj_set_style_bg_color(s_trae_aprv_box, lv_color_hex(C_BG), 0);
+    lv_obj_set_style_bg_opa(s_trae_aprv_box, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_trae_aprv_box, 2, 0);
+    lv_obj_set_style_border_color(s_trae_aprv_box, lv_color_hex(C_AMBER), 0);
+    lv_obj_set_style_radius(s_trae_aprv_box, 6, 0);
+    lv_obj_set_style_pad_all(s_trae_aprv_box, 0, 0);
+    lv_obj_clear_flag(s_trae_aprv_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(s_trae_aprv_box, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_trae_aprv_box, LV_OBJ_FLAG_HIDDEN);
+
+    s_trae_aprv_id = put_label(s_trae_aprv_box, "待审批 #--", 8, 4,
+                               &app_font_20, C_AMBER);
+    s_trae_aprv_cmd = make_label(s_trae_aprv_box, "--", &app_font_14, C_TEXT);
+    lv_obj_set_pos(s_trae_aprv_cmd, 8, 32);
+    lv_obj_set_width(s_trae_aprv_cmd, 200);
+    lv_obj_set_height(s_trae_aprv_cmd, 50);
+    lv_label_set_long_mode(s_trae_aprv_cmd, LV_LABEL_LONG_WRAP);
+    s_trae_aprv_hint = put_label(s_trae_aprv_box, "OK:批准  长按OK:拒绝", 8, 88,
+                                 &app_font_14, C_GREEN);
+}
+
+// On-demand pages: only the visible page's widgets live in the LVGL pool.
+// All 13 pages resident exhausted the 80KB pool (15% free, crash loop on the
+// approval view); building a page on switch keeps usage at one page's cost.
+typedef void (*page_builder_t)(lv_obj_t *);
+
+static const page_builder_t s_builders[PCMON_PAGES] = {
+    build_core, build_cpu, build_mem, build_disk, build_net,
+    build_trend, build_sys, build_gpu, build_proc, build_port,
+    build_ark, build_trae, build_agent,
+};
+
+static int s_built_view = -1;
+
+static void page_show(int view)
+{
+    if (s_built_view == view) {
+        return;
+    }
+    if (s_built_view >= 0 && s_page[s_built_view]) {
+        lv_obj_delete(s_page[s_built_view]);
+        s_page[s_built_view] = NULL;
+    }
+    s_page[view] = make_container(s_scr, 0, 34, 240, 262);
+    s_builders[view](s_page[view]);
+    s_built_view = view;
 }
 
 static void build_ui(void)
@@ -607,25 +730,20 @@ static void build_ui(void)
     lv_obj_clear_flag(sep, LV_OBJ_FLAG_SCROLLABLE);
 
     for (int i = 0; i < PCMON_PAGES; i++) {
-        s_page[i] = make_container(s_scr, 0, 34, 240, 262);
+        s_page[i] = NULL;  // built on demand by page_show()
     }
-    build_core(s_page[0]);
-    build_cpu(s_page[1]);
-    build_mem(s_page[2]);
-    build_disk(s_page[3]);
-    build_net(s_page[4]);
-    build_trend(s_page[5]);
-    build_sys(s_page[6]);
-    build_gpu(s_page[7]);
-    build_proc(s_page[8]);
-    build_port(s_page[9]);
-    build_ark(s_page[10]);
-    build_agent(s_page[11]);
 
     s_hint = put_label(s_scr, "UP/DN page  OK:req  HOLD:pause", 12, 298,
                        &lv_font_montserrat_14, C_MUTED);
 
     lv_screen_load(s_scr);
+
+    // One-shot snapshot after all 13 pages are built: baseline pool usage.
+    lv_mem_monitor_t mon;
+    lv_mem_monitor(&mon);
+    ESP_LOGI(TAG, "ui built: lv used=%u%% free=%u B, heap free=%u",
+             (unsigned)mon.used_pct, (unsigned)mon.free_size,
+             (unsigned)esp_get_free_heap_size());
 }
 
 static void set_hidden(lv_obj_t *obj, bool hidden)
@@ -1088,15 +1206,115 @@ static void render_ark(void)
     }
 }
 
+static void render_trae(void)
+{
+    int64_t now = esp_timer_get_time() / 1000;
+    if (s_view == PCMON_VIEW_TRAE && now - s_av_frame_ms >= 400) {
+        s_av_frame_ms = now;
+        trae_avatar_next_frame();
+    }
+
+    // Memory probe: log once per second while on this page, to catch LVGL
+    // pool exhaustion (suspected cause of the white-screen reboot loop).
+    static int64_t s_probe_ms;
+    if (s_view == PCMON_VIEW_TRAE && now - s_probe_ms >= 1000) {
+        s_probe_ms = now;
+        lv_mem_monitor_t mon;
+        lv_mem_monitor(&mon);
+        ESP_LOGI(TAG, "trae page: lv free=%u%% (%u B), heap free=%u",
+                 (unsigned)(100 - mon.used_pct), (unsigned)mon.free_size,
+                 (unsigned)esp_get_free_heap_size());
+    }
+
+    static const char *const st_names[] = {
+        "已累瘫", "思考中", "敲代码中", "构建中", "通过", "失败"};
+    static const uint32_t st_colors[] = {
+        C_MUTED, C_CYAN, C_GREEN, C_AMBER, C_GREEN, C_RED};
+
+    if (!s_trae.valid) {
+        trae_avatar_set_state(PCMON_TRAE_IDLE);
+        lv_label_set_text(s_trae_chip, "离线");
+        lv_obj_set_style_text_color(s_trae_chip, lv_color_hex(C_MUTED), 0);
+        lv_obj_set_style_border_color(s_trae_chip_obj, lv_color_hex(C_MUTED), 0);
+    } else {
+        int st = s_trae.st;
+        if (st < PCMON_TRAE_IDLE || st > PCMON_TRAE_FAIL) {
+            st = PCMON_TRAE_IDLE;
+        }
+        trae_avatar_set_state(st);
+        lv_label_set_text(s_trae_chip, st_names[st]);
+        lv_obj_set_style_text_color(s_trae_chip, lv_color_hex(st_colors[st]), 0);
+        lv_obj_set_style_border_color(s_trae_chip_obj,
+                                      lv_color_hex(st_colors[st]), 0);
+    }
+
+    if (s_trae.has_task) {
+        lv_label_set_text_fmt(s_trae_task, "#%ld", s_trae.task);
+        lv_obj_set_style_text_color(s_trae_task, lv_color_hex(C_TEXT), 0);
+    } else {
+        lv_label_set_text(s_trae_task, "--");
+        lv_obj_set_style_text_color(s_trae_task, lv_color_hex(C_DIM), 0);
+    }
+    if (s_trae.has_rate) {
+        lv_label_set_text_fmt(s_trae_rate, "%d%%", s_trae.rate);
+        lv_bar_set_value(s_trae_rate_bar, clamp100(s_trae.rate), LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(s_trae_rate_bar,
+            lv_color_hex(level_color(pcmon_level(s_trae.rate))),
+            LV_PART_INDICATOR);
+    } else {
+        lv_label_set_text(s_trae_rate, "--");
+        lv_bar_set_value(s_trae_rate_bar, 0, LV_ANIM_OFF);
+    }
+    if (s_trae.has_cm) {
+        lv_label_set_text_fmt(s_trae_cm, "%ld 分钟", s_trae.cm);
+    } else {
+        lv_label_set_text(s_trae_cm, "--");
+    }
+
+    if (s_aprv.valid) {
+        // Full-screen review: swap the stat rows for the command box.
+        set_hidden(s_trae_aprv_box, false);
+        set_hidden(s_trae_stats, true);
+        lv_label_set_text_fmt(s_trae_aprv_id, "待审批 #%ld", s_aprv.id);
+        lv_label_set_text(s_trae_aprv_cmd, s_aprv.cmd[0] ? s_aprv.cmd : "--");
+        // Blink the action hint so an idle badge is obvious from across the desk.
+        set_hidden(s_trae_aprv_hint, ((now / 500) & 1) != 0);
+    } else {
+        set_hidden(s_trae_aprv_box, true);
+        set_hidden(s_trae_stats, false);
+    }
+
+    // Persistent "last decision" line (was a 2s flash; kept visible now so
+    // the bottom of the page always carries some color once a decision lands).
+    if (s_aprv_done_ms != 0) {
+        lv_label_set_text_fmt(s_trae_feedback, "最近审批 %s #%ld",
+                              s_aprv_allow ? "已批准" : "已拒绝", s_aprv_done_id);
+        lv_obj_set_style_text_color(s_trae_feedback,
+                                    lv_color_hex(s_aprv_allow ? C_GREEN : C_RED), 0);
+    } else {
+        lv_label_set_text(s_trae_feedback, "最近审批 --");
+        lv_obj_set_style_text_color(s_trae_feedback, lv_color_hex(C_MUTED), 0);
+    }
+}
+
+// Dispatch table so only the visible page's renderer runs; off-page widgets
+// don't exist under on-demand building, so their renderers must not touch
+// dangling pointers.
+typedef void (*page_renderer_t)(void);
+
+static const page_renderer_t s_renderers[PCMON_PAGES] = {
+    render_core, render_cpu, render_mem, render_disk, render_net,
+    render_trend, render_sys, render_gpu, render_proc, render_port,
+    render_ark, render_trae, render_agent,
+};
+
 static void render(void)
 {
     if (!s_scr) {
         return;
     }
 
-    for (int i = 0; i < PCMON_PAGES; i++) {
-        set_hidden(s_page[i], s_view != i);
-    }
+    page_show(s_view);
     lv_label_set_text(s_title, PAGE_NAMES[s_view]);
 
     int64_t now = esp_timer_get_time() / 1000;
@@ -1125,24 +1343,15 @@ static void render(void)
 
     if (s_paused) {
         lv_label_set_text(s_hint, "PAUSED  OK:req  HOLD:resume");
+    } else if (s_view == PCMON_VIEW_TRAE && s_aprv.valid) {
+        lv_label_set_text(s_hint, "UP/DN page  OK:allow  HOLD:deny");
     } else if (s_view == PCMON_VIEW_PROC) {
         lv_label_set_text(s_hint, "UP/DN page  OK:sort  HOLD:pause");
     } else {
         lv_label_set_text(s_hint, "UP/DN page  OK:req  HOLD:pause");
     }
 
-    render_core();
-    render_cpu();
-    render_mem();
-    render_disk();
-    render_net();
-    render_trend();
-    render_sys();
-    render_gpu();
-    render_proc();
-    render_port();
-    render_ark();
-    render_agent();
+    s_renderers[s_view]();
 }
 
 static void hist_push(int v)
@@ -1199,6 +1408,23 @@ static void request_now(void)
     }
 }
 
+// Sends the badge's decision for the pending approval and swaps the overlay
+// for a short "已批准/已拒绝" feedback. The bridge clears its pending queue
+// on $TBTN, so the $TAPRV stream stops with this id.
+static void send_trae_decision(bool allow)
+{
+    char out[48];
+    if (pcmon_format_trae_btn(s_aprv.id, allow, out, sizeof(out)) > 0) {
+        pcmon_link_send(out);
+        s_tx_frames++;
+    }
+    s_aprv_allow = allow;
+    s_aprv_done_id = s_aprv.id;
+    s_aprv_done_ms = esp_timer_get_time() / 1000;
+    pcmon_trae_aprv_reset(&s_aprv);
+    ESP_LOGI(TAG, "trae approval #%ld %s", s_aprv_done_id, allow ? "allow" : "deny");
+}
+
 static bool handle_event(const pcmon_ev_t *ev)
 {
     if (ev->kind == PCMON_EV_LINE) {
@@ -1238,6 +1464,26 @@ static bool handle_event(const pcmon_ev_t *ev)
             return true;
         }
 
+        pcmon_trae_t trae;
+        if (pcmon_parse_trae(ev->line, &trae)) {
+            s_trae = trae;
+            return true;
+        }
+
+        pcmon_trae_aprv_t aprv;
+        if (pcmon_parse_trae_aprv(ev->line, &aprv)) {
+            if (aprv.id != s_aprv_skip_id &&
+                (!s_aprv.valid || aprv.id != s_aprv.id)) {
+                // New pending command: show it and jump to the battle page.
+                s_aprv = aprv;
+                s_aprv_rx_ms = esp_timer_get_time() / 1000;
+                if (s_view != PCMON_VIEW_TRAE) {
+                    s_view = PCMON_VIEW_TRAE;
+                }
+            }
+            return true;
+        }
+
         pcmon_stats_t parsed;
         if (pcmon_parse_status(ev->line, &parsed)) {
             bool new_sample = !s_stats.valid || parsed.cpu != s_stats.cpu ||
@@ -1265,6 +1511,10 @@ static bool handle_event(const pcmon_ev_t *ev)
             return true;
         }
         if (ev->btn == BSP_BTN_OK) {
+            if (s_view == PCMON_VIEW_TRAE && s_aprv.valid) {
+                send_trae_decision(true);
+                return true;
+            }
             if (s_view == PCMON_VIEW_PROC) {
                 s_proc_sort = s_proc_sort ? 0 : 1;
             }
@@ -1273,6 +1523,11 @@ static bool handle_event(const pcmon_ev_t *ev)
         }
     }
     if (ev->bev == BSP_BTN_LONG && ev->btn == BSP_BTN_OK) {
+        if (s_view == PCMON_VIEW_TRAE && s_aprv.valid) {
+            // Long OK cancels the pending RunCommand.
+            send_trae_decision(false);
+            return true;
+        }
         s_paused = !s_paused;
         ESP_LOGI(TAG, "auto poll %s", s_paused ? "paused" : "resumed");
         return true;
@@ -1306,7 +1561,16 @@ static void app_task(void *arg)
             changed = handle_event(&ev);
         }
 
-        if (changed || now - last_tick >= 1000) {
+        // Drop a pending approval once its hook could no longer be waiting.
+        if (s_aprv.valid && now - s_aprv_rx_ms >= PCMON_APRV_TTL_MS) {
+            s_aprv_skip_id = s_aprv.id;
+            pcmon_trae_aprv_reset(&s_aprv);
+            changed = true;
+        }
+
+        // Faster tick while the battle page animates or an approval blinks.
+        int tick_ms = (s_aprv.valid || s_view == PCMON_VIEW_TRAE) ? 500 : 1000;
+        if (changed || now - last_tick >= tick_ms) {
             last_tick = now;
             if (bsp_lvgl_lock(200)) {
                 render();
@@ -1324,6 +1588,10 @@ bool app_pcmon_start(void)
     pcmon_port_list_reset(&s_port_list);
     pcmon_gpu_reset(&s_gpu);
     pcmon_ark_reset(&s_ark);
+    pcmon_trae_reset(&s_trae);
+    pcmon_trae_aprv_reset(&s_aprv);
+    s_aprv_done_ms = 0;
+    s_aprv_skip_id = 0;
     s_proc_sort = 0;
     s_last_rx_ms = esp_timer_get_time() / 1000;
     s_last_agent_ms = s_last_rx_ms;

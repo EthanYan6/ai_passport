@@ -4,6 +4,7 @@ set(SRCS
     "app_pcmon.c"
     "pcmon_protocol.c"
     "pcmon_link.c"
+    "trae_avatar.c"
     # 中文 UI 字体子集（lv_font_conv 生成）
     "assets/fonts/app_font_14.c"
     "assets/fonts/app_font_20.c"

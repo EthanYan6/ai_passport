@@ -83,8 +83,14 @@ try:
 except ImportError:  # pragma: no cover
     psutil = None
 
+try:
+    from trae_monitor import TRAE_TCP_PORT, TraeMonitor
+except ImportError:  # pragma: no cover
+    TRAE_TCP_PORT = 8765
+    TraeMonitor = None  # type: ignore[assignment]
+
 ESP_VID = 0x303A
-PROTO_VER = 5
+PROTO_VER = 6
 PCMON_MAX_FIELD = 31
 PCMON_CORES_MAX = 8
 PCMON_PROC_MAX = 8
@@ -1151,6 +1157,14 @@ def answer(sampler: Sampler, need: str | None, sort: int) -> bytes:
         payload += build_gpu_frame(sampler.gpu.sample())
     elif need == "ark":
         payload += build_ark_frame(sampler.ark.sample())
+    # TRAE battle frames ride on every answer; the device polls often enough
+    # (~1.5 s) that no extra need token is needed for them.
+    monitor = getattr(sampler, "trae", None)
+    if monitor is not None:
+        payload += monitor.tstat_frame()
+        aprv = monitor.aprv_frame()
+        if aprv is not None:
+            payload += aprv
     return bytes(payload)
 
 
@@ -1171,9 +1185,23 @@ def serve(port: str, sampler: Sampler, logger: logging.Logger) -> None:
             if request is not None:
                 need, sort = request
                 ser.write(answer(sampler, need, sort))
+            elif line.startswith(b"$TBTN"):
+                monitor = getattr(sampler, "trae", None)
+                if monitor is not None:
+                    monitor.on_btn_frame(line.decode("utf-8", "ignore"))
             elif now - last_agent >= AGENT_PERIOD_S:
                 ser.write(build_agent_frame())
                 last_agent = now
+            elif line.strip():
+                # Device console output (logs, crash backtraces): keep it in
+                # the log so panics can be diagnosed without a second tool
+                # holding the port. "$" protocol frames fall through above.
+                text = line.decode("utf-8", "replace").rstrip()
+                if ("Guru" in text or "panic" in text or "Backtrace" in text
+                        or "abort" in text):
+                    logger.warning("DEV: %s", text)
+                else:
+                    logger.info("DEV: %s", text)
 
 
 def run(
@@ -1203,6 +1231,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="FoloToy AI Passport PC status bridge")
     parser.add_argument("--port", help="serial port of the device (default: auto-detect)")
     parser.add_argument("--once", action="store_true", help="print one sample and exit")
+    parser.add_argument(
+        "--trae-port",
+        type=int,
+        default=None,
+        help="loopback TCP port for TRAE hook clients (default: 8765)",
+    )
     parser.add_argument(
         "--delay",
         type=float,
@@ -1238,6 +1272,17 @@ def main() -> int:
 
     try:
         sampler = Sampler()
+        if TraeMonitor is not None:
+            try:
+                monitor = TraeMonitor(
+                    tcp_port=args.trae_port or TRAE_TCP_PORT, logger=logger
+                )
+                monitor.start()
+                sampler.trae = monitor
+            except OSError as exc:
+                logger.warning("TRAE battle page disabled (%s)", exc)
+        elif psutil is not None:
+            logger.warning("trae_monitor.py missing; TRAE battle page inactive")
         if psutil is None:
             logger.warning(
                 "psutil not installed; sending host/OS/uptime only. "

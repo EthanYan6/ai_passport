@@ -23,6 +23,9 @@
 #define PCMON_ARK_TITLE_MAX 32
 #define PCMON_ARK_WINDOWS 3 // 0 = last 5 hours, 1 = week, 2 = month
 
+#define PCMON_TRAE_CMD_MAX 120
+#define PCMON_TRAE_ST_MAX 8
+
 #define PCMON_NEED_PROC "proc"
 #define PCMON_NEED_PORT "port"
 #define PCMON_NEED_GPU "gpu"
@@ -152,6 +155,34 @@ typedef struct {
     long reset_s[PCMON_ARK_WINDOWS]; // seconds until the window resets
 } pcmon_ark_t;
 
+// TRAE agent status, from $TSTAT frames sent by the bridge.
+typedef enum {
+    PCMON_TRAE_IDLE = 0,
+    PCMON_TRAE_THINK,
+    PCMON_TRAE_CODE,
+    PCMON_TRAE_BUILD,
+    PCMON_TRAE_PASS,
+    PCMON_TRAE_FAIL,
+} pcmon_trae_state_t;
+
+typedef struct {
+    bool valid;
+    int st; // pcmon_trae_state_t
+    bool has_task;
+    long task;
+    bool has_rate;
+    int rate; // pass rate percent 0-100
+    bool has_cm;
+    long cm; // coding minutes today
+} pcmon_trae_t;
+
+// A pending RunCommand approval, from $TAPRV frames.
+typedef struct {
+    bool valid;
+    long id;
+    char cmd[PCMON_TRAE_CMD_MAX]; // UTF-8 command text, sanitized
+} pcmon_trae_aprv_t;
+
 void pcmon_stats_reset(pcmon_stats_t *stats);
 
 void pcmon_proc_list_reset(pcmon_proc_list_t *list);
@@ -174,6 +205,14 @@ bool pcmon_parse_gpu(const char *frame, pcmon_gpu_t *out);
 
 bool pcmon_parse_ark(const char *frame, pcmon_ark_t *out);
 
+void pcmon_trae_reset(pcmon_trae_t *trae);
+
+void pcmon_trae_aprv_reset(pcmon_trae_aprv_t *aprv);
+
+bool pcmon_parse_trae(const char *frame, pcmon_trae_t *out);
+
+bool pcmon_parse_trae_aprv(const char *frame, pcmon_trae_aprv_t *out);
+
 // need is NULL for a plain request, otherwise PCMON_NEED_PROC / PCMON_NEED_PORT /
 // PCMON_NEED_GPU / PCMON_NEED_ARK.
 int pcmon_format_request(char *out, size_t n, const char *need, int sort);
@@ -189,5 +228,8 @@ int pcmon_format_port_list(const pcmon_port_list_t *list, char *out, size_t n);
 int pcmon_format_gpu(const pcmon_gpu_t *gpu, char *out, size_t n);
 
 int pcmon_format_ark(const pcmon_ark_t *ark, char *out, size_t n);
+
+// Device -> bridge decision for a $TAPRV request: r=allow|deny.
+int pcmon_format_trae_btn(long id, bool allow, char *out, size_t n);
 
 int pcmon_level(float percent);
