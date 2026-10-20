@@ -95,12 +95,20 @@ def main() -> int:
 
     event = str(payload.get("hook_event_name") or "")
     tool = str(payload.get("tool_name") or "")
+    sid = str(payload.get("session_id") or "")
     if not event:
         _log("(no event)", "keys=" + ",".join(sorted(payload))[:120])
         return 0
-    _log(event, f"tool={tool}")
+    # sid prefix tells apart the TRAE windows in the log.
+    _log(event, f"tool={tool} sid={sid[:8]}")
 
-    req: dict = {"event": event, "tool": tool}
+    req: dict = {
+        "event": event,
+        "tool": tool,
+        # session_id tells the monitor which TRAE window fired the event, so
+        # two windows don't clobber each other's state.
+        "sid": sid[:64],
+    }
 
     if event == "PreToolUse" and tool == "RunCommand":
         tool_input = payload.get("tool_input") or {}

@@ -86,12 +86,14 @@ class TraeMonitor:
         self._port = tcp_port
         self._log = logger or logging.getLogger("pcmon.bridge")
         self._lock = threading.Lock()
-        self._state = "idle"
+        # Per-window session states (sid = TRAE session_id, one per window).
+        # The badge shows the most active session, so one window's Stop no
+        # longer wipes another window's "thinking" state.
+        self._sessions: dict[str, dict] = {}
         self._task = 0
         self._passed = 0
         self._failed = 0
         self._coding_s = 0.0
-        self._active_since: float | None = None
         self._day = time.localtime().tm_yday
         self._pending: list[_Approval] = []
         self._next_id = 1
@@ -160,19 +162,20 @@ class TraeMonitor:
     def handle_event(self, req: dict) -> dict:
         event = str(req.get("event") or "")
         tool = str(req.get("tool") or "")
+        sid = str(req.get("sid") or "")
         now = time.monotonic()
 
         if event == "PreToolUse" and tool == "RunCommand":
-            return self._ask_run_command(req, now)
+            return self._ask_run_command(req, sid, now)
 
         with self._lock:
             self._roll_day()
             if event == "UserPromptSubmit":
-                self._set_state("think", now)
+                self._set_session(sid, "think", now)
                 self._task += 1
                 return {"ok": True, "state": "think", "task": self._task}
             if event == "PreToolUse":
-                self._set_state("code", now)
+                self._set_session(sid, "code", now)
                 return {"ok": True, "state": "code"}
             if event == "PostToolUse":
                 if tool == "RunCommand":
@@ -182,19 +185,19 @@ class TraeMonitor:
                         code = 1
                     if code == 0:
                         self._passed += 1
-                        self._set_state("pass", now)
+                        self._set_session(sid, "pass", now)
                     else:
                         self._failed += 1
-                        self._set_state("fail", now)
-                    return {"ok": True, "state": self._state}
-                self._set_state("code", now)
+                        self._set_session(sid, "fail", now)
+                    return {"ok": True, "state": self._session_state(sid)}
+                self._set_session(sid, "code", now)
                 return {"ok": True, "state": "code"}
             if event in ("Stop", "SessionStart", "SessionEnd"):
-                self._set_state("idle", now)
+                self._set_session(sid, "idle", now)
                 return {"ok": True, "state": "idle"}
             return {"ok": False, "error": f"unknown event {event!r}"}
 
-    def _ask_run_command(self, req: dict, now: float) -> dict:
+    def _ask_run_command(self, req: dict, sid: str, now: float) -> dict:
         """Queue the command for badge approval and block until it answers.
 
         The hook passes its own remaining budget in ``wait``; the monitor
@@ -210,7 +213,7 @@ class TraeMonitor:
 
         with self._lock:
             self._roll_day()
-            self._set_state("build", now)
+            self._set_session(sid, "build", now)
             aprv = _Approval(self._next_id, cmd)
             self._next_id += 1
             self._pending.append(aprv)
@@ -224,7 +227,7 @@ class TraeMonitor:
                 pass
             if aprv.decision != "allow":
                 # Denied or timed out: TRAE is still working on the task.
-                self._set_state("code", time.monotonic())
+                self._set_session(sid, "code", time.monotonic())
         return {
             "ok": True,
             "id": aprv.id,
@@ -236,7 +239,7 @@ class TraeMonitor:
     def tstat_frame(self) -> bytes:
         with self._lock:
             now = time.monotonic()
-            fields = [f"st={self._state}"]
+            fields = [f"st={self._aggregate_state(now)}"]
             if self._task > 0:
                 fields.append(f"task={self._task}")
             total = self._passed + self._failed
@@ -275,14 +278,49 @@ class TraeMonitor:
 
     # -------------------------------------------------------------- internals
 
-    def _set_state(self, state: str, now: float) -> None:
-        """Switch state (lock held) and bank the active working time."""
-        if state == self._state:
+    def _set_session(self, sid: str, state: str, now: float) -> None:
+        """Switch one session's state (lock held) and bank its active time."""
+        session = self._sessions.get(sid)
+        if session is None:
+            session = self._sessions[sid] = {
+                "state": "idle",
+                "since": None,
+                "last": now,
+            }
+        session["last"] = now
+        if state == session["state"]:
             return
-        if self._state in ACTIVE_STATES and self._active_since is not None:
-            self._coding_s += now - self._active_since
-        self._state = state
-        self._active_since = now if state in ACTIVE_STATES else None
+        if session["state"] in ACTIVE_STATES and session["since"] is not None:
+            self._coding_s += now - session["since"]
+        session["state"] = state
+        session["since"] = now if state in ACTIVE_STATES else None
+
+    def _session_state(self, sid: str) -> str:
+        session = self._sessions.get(sid)
+        return session["state"] if session else "idle"
+
+    def _aggregate_state(self, now: float) -> str:
+        """The badge shows the most active session (lock held).
+
+        Sessions silent for 30 minutes are pruned so a closed window stops
+        contributing its last state forever.
+        """
+        for sid in list(self._sessions):
+            session = self._sessions[sid]
+            if now - session["last"] > 1800.0:
+                if session["state"] in ACTIVE_STATES and session["since"] is not None:
+                    self._coding_s += now - session["since"]
+                del self._sessions[sid]
+        states = {s["state"] for s in self._sessions.values()}
+        # Priority: a pending approval is most urgent, then real work, then
+        # the transient pass/fail flashes, idle only when nothing moves.
+        for want in ("build", "code", "think"):
+            if want in states:
+                return want
+        for want in ("pass", "fail"):
+            if want in states:
+                return want
+        return "idle"
 
     def _roll_day(self) -> None:
         day = time.localtime().tm_yday
@@ -293,7 +331,10 @@ class TraeMonitor:
             self._failed = 0
 
     def _coding_minutes(self, now: float) -> int:
+        # Banked time plus every session's live active stretch (two windows
+        # working in parallel both count).
         active = self._coding_s
-        if self._active_since is not None:
-            active += now - self._active_since
+        for session in self._sessions.values():
+            if session["state"] in ACTIVE_STATES and session["since"] is not None:
+                active += now - session["since"]
         return int(active // 60)

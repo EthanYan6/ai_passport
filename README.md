@@ -204,3 +204,41 @@ python tools/install_hooks.py --remove # 移除
 - `%LOCALAPPDATA%\FoloToy\trae-hook.log`：hook 每次被调写一行
 - bridge 日志：`%LOCALAPPDATA%\FoloToy\pcmon-bridge.log`
 - 注意：hooks.json 中的命令禁止带引号（TRAE 的 PowerShell 包装脚本会解析失败），`install_hooks.py` 已强制无空格裸路径；Python / 仓库路径都不能含空格
+
+---
+
+## 9. 远程项目的 hook 配置（可选）
+
+TRAE 的远程项目（SSH 等）的 agent 在远端跑，hooks 也由远端触发——**远端机器需要单独装一份 hook**，事件通过 SSH 反向隧道送回本机 bridge。
+
+**前提**：远端已可 SSH 直连；本机 bridge 已启动。
+
+**1. 本机部署到远端**（一次性，在本机仓库根目录跑）：
+
+```bash
+# 在仓库根目录执行；user@host 换成远端 SSH 登录名和地址
+bash firmwares/pc-monitor/tools/deploy_remote_hook.sh user@192.168.10.11
+```
+
+脚本会做三件事：把 `trae_hook.py` 和 `hooks-remote.json` 拷到远端 `~/.trae-hooks/`、备份远端 `~/.trae-cn/hooks.json`、把配置写入。
+
+**2. 本机启动反向隧道**（把远端的 8765 映射回本机的 8765；挂着的终端不能关，断开即失效）：
+
+```powershell
+ssh -N -R 8765:127.0.0.1:8765 user@192.168.10.11
+```
+
+**3. 在远端 TRAE 窗口里启用**：
+
+- 设置 > Hooks：确认 5 条出现在列表，**打开开关**
+- 运行方式：**本地自动运行**（沙箱连不了 8765）
+- **重启那个窗口**（hooks.json 只在窗口启动时读）
+
+**验证**：远端窗口发条消息，本机 hook 日志 `%LOCALAPPDATA%\FoloToy\trae-hook.log` 会出现一个新的 sid（与本机窗口不同），胸牌战况页状态徽章同步亮起。
+
+**注意事项**：
+
+- 远端只转发事件到隧道，**审批按键回本机**——你在胸牌上按 OK/长按 OK，决策经隧道发回远端 TRAE 放行/拦截
+- 多个窗口同时工作时，胸牌显示最活跃的那个；本机 + 远端窗口互不干扰（按 session_id 区分）
+- 隧道断了远端 hook 会回退为 TRAE 原生确认弹窗，不影响命令执行
+- 远端移除：`ssh user@host 'rm -rf ~/.trae-hooks ~/.trae-cn/hooks.json'`（如需还原，恢复 `.bak` 备份）
