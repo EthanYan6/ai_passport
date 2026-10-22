@@ -217,16 +217,43 @@ TRAE 的远程项目（SSH 等）的 agent 在远端跑，hooks 也由远端触�
 
 ```bash
 # 在仓库根目录执行；user@host 换成远端 SSH 登录名和地址
-bash firmwares/pc-monitor/tools/deploy_remote_hook.sh user@192.168.10.11
+bash firmwares/pc-monitor/tools/deploy_remote_hook.sh user@your-remote-host
 ```
 
 脚本会做三件事：把 `trae_hook.py` 和 `hooks-remote.json` 拷到远端 `~/.trae-hooks/`、备份远端 `~/.trae-cn/hooks.json`、把配置写入。
 
-**2. 本机启动反向隧道**（把远端的 8765 映射回本机的 8765；挂着的终端不能关，断开即失效）：
+**2. 本机启动反向隧道**（把远端的 8765 映射回本机的 8765）：
+
+方式一：开机自启（推荐，装一次永久生效；断线自动重连）
 
 ```powershell
-ssh -N -R 8765:127.0.0.1:8765 user@192.168.10.11
+# 一次性前提：把本机 key 授权到远端（会输一次远端密码）
+type $env:USERPROFILE\.ssh\id_rsa.pub | ssh user@your-remote-host "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+
+# 注册计划任务（-Remote 填你的远端 SSH 登录名@地址）+ 立即启动
+powershell -ExecutionPolicy Bypass -File firmwares\pc-monitor\tools\install_tunnel_autostart.ps1 -Remote user@your-remote-host
+Start-ScheduledTask -TaskName 'FoloToy PcMon Tunnel'
 ```
+
+之后每次登录 Windows 自动后台运行（经 `conhost --headless` 启动，**无控制台窗口**），断线 5 秒自动重连。
+
+方式二：手动 ssh（调试用；挂着的终端不能关，断开即失效）
+
+```powershell
+ssh -N -R 8765:127.0.0.1:8765 user@your-remote-host
+```
+
+隧道的停止与移除：
+
+```powershell
+# 手动关闭（立即断开；下次登录 Windows 仍会自启）
+Stop-ScheduledTask -TaskName 'FoloToy PcMon Tunnel'
+
+# 彻底关闭（删除自启任务并清掉残留隧道进程）
+powershell -ExecutionPolicy Bypass -File firmwares\pc-monitor\tools\install_tunnel_autostart.ps1 -Remove
+```
+
+隧道日志：`%LOCALAPPDATA%\FoloToy\pcmon-tunnel.log`（每次连接/断开都记一行）。
 
 **3. 在远端 TRAE 窗口里启用**：
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy trae_hook.py + hooks.json to a Rocky Linux remote TRAE host.
 # Run from anywhere on your local machine:
-#   bash tools/deploy_remote_hook.sh user@192.168.10.11
+#   bash tools/deploy_remote_hook.sh user@your-remote-host
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
