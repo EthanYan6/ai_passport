@@ -16,8 +16,8 @@
 # Review it before running.
 
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$Remote,
+    [Parameter(Mandatory=$false)]
+    [string]$Remote = "",
     [switch]$Remove
 )
 
@@ -33,19 +33,26 @@ if ($Remove) {
     } else {
         Write-Host "Scheduled task '$taskName' was not present."
     }
-    # Best effort: kill any leftover tunnel ssh process.
-    Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
-        Where-Object { $_.CommandLine -match '-R 8765:' } |
-        ForEach-Object {
-            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            Write-Host "Killed leftover ssh tunnel (PID $($_.ProcessId))."
-        }
+    # Best-effort: kill orphaned tunnel processes left behind by a stopped task,
+    # so a removed task cannot leave a dangling remote forward behind.
+    # The wrapper keeps respawning ssh, so it must be killed first.
+    Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object {
+        $_.CommandLine -and $_.CommandLine -match "pcmon_tunnel\.ps1"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" | Where-Object {
+        $_.CommandLine -and $_.CommandLine -match "8765"
+    } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     return
 }
 
 $scriptPath = Join-Path $PSScriptRoot "pcmon_tunnel.ps1"
 if (-not (Test-Path -LiteralPath $scriptPath)) {
     throw "Tunnel wrapper script not found next to this installer: $scriptPath"
+}
+
+if (-not $Remote) {
+    Write-Error "-Remote 不能为空，用法：install_tunnel_autostart.ps1 -Remote user@your-remote-host（-Remove 时不需要）"
+    exit 1
 }
 
 # The tunnel runs unattended, so key auth must already work without prompting.
