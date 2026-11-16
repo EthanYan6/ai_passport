@@ -1,0 +1,5 @@
+## IDF 组件管理器清单：SSH 直连服务器监控用
+dependencies:
+  idf: ">=5.5"
+  wolfssl/wolfssh: "^1.4.20"   # SSH 客户端库（exec 采集 CPU/内存/磁盘/容器）
+  wolfssl/wolfssl: ">=5.7.4"   # wolfssh 的底层密码库
