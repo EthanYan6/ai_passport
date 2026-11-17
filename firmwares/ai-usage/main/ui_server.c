@@ -180,15 +180,10 @@ void ui_server_render(const srv_data_t *d, long elapsed_s)
             } else {
                 ui_label_printf(s_pct[i], "%d%%", v);
                 if (i == 1) {
-                    // 内存以 MB 存储，≥1GB 时显示为 G（与磁盘行风格一致）
-                    if (d->mem_total_mb >= 1024) {
-                        ui_label_printf(s_val[i], "%d/%dG",
-                                        (d->mem_used_mb + 512) / 1024,
-                                        (d->mem_total_mb + 512) / 1024);
-                    } else {
-                        ui_label_printf(s_val[i], "%d/%dM", d->mem_used_mb,
-                                        d->mem_total_mb);
-                    }
+                    // 内存以 MB 存储，按 G 一位小数显示（口径同 free -h）
+                    ui_label_printf(s_val[i], "%.1f/%.1fG",
+                                    (double)d->mem_used_mb / 1024.0,
+                                    (double)d->mem_total_mb / 1024.0);
                 } else {
                     ui_label_printf(s_val[i], "%d/%dG", d->disk_used_gb,
                                     d->disk_total_gb);
