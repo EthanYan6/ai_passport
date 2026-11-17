@@ -5,8 +5,8 @@
 - 方舟：显示 Token 用量、限额、百分比与用量进度条
 - 智谱 zcode：显示 5 小时窗口、每周限额与月度 MCP 调用次数
 - 阿里云百炼：显示 Coding Plan 的 5 小时、每周、每月三档真实请求额度
-- 服务器：经 wolfSSH 登录执行 `cat /sys/fs/cgroup/system.slice/openclaw.service/cpu.stat`，显示 CPU 与内存占用
-- 每屏自动轮播、OK 手动换页、长按暂停、30–600 秒可选自动刷新
+- 服务器：经 wolfSSH 登录执行一条采集命令（/proc/stat 两次采样算 CPU、/proc/meminfo、df 根分区、docker ps），显示 CPU、内存、磁盘占用与 Docker 容器列表（名称/状态/端口映射，长按上/下翻容器页）
+- 每屏自动轮播、OK 手动换页、OK 长按暂停、30 秒～30 分钟可选自动刷新
 - 手机扫码进入 Captive Portal，配置 WiFi、各服务凭据、服务器与刷新间隔
 - 门户「显示设置」可勾选隐藏 方舟 / zcode / 百炼 任一平台：不进轮播、不再查询，状态点只统计可见平台
 - 页面按需构建并复用 LVGL 缓冲；后台网络与 SSH 采集串行执行
@@ -21,9 +21,9 @@ idf.py -p COMx flash monitor
 
 ## 配网
 
-1. 开机等待 `NO KEY` / `配网` 页，或长按 `K2` 进入配网
-2. 手机连接 `AI-xxxxxxxx` 热点（密码见 `APP_AP_PASS_8371`）
-3. 扫描屏幕二维码或打开 `http://192.168.4.1/`
+1. 首次开机（未配置 WiFi）自动进入配网页；平时切到设置页长按 `OK` 进入配网
+2. 用手机相机扫屏幕二维码直连热点，或手动连接 `Usage-XXXX`（密码 `12345678`，见 `APP_AP_PASS_8371`）；设备仅支持 2.4GHz WiFi
+3. 连接后配置门户通常自动弹出；未弹出时打开 `http://192.168.4.1/`
 4. 依次填写 WiFi、火山方舟、智谱 zcode、阿里云百炼及 SSH 服务器信息
 5. 需要时在「显示设置」卡片勾选/取消各平台页面（默认全部显示）
 
@@ -67,7 +67,7 @@ main/
   ark_client.c         方舟 V4 签名与 HTTP 查询
   zcode_client.c       zcode HTTPS 查询
   bailian_client.c     百炼 ACS3 签名、控制台令牌与三档额度查询
-  ssh_client.c         wolfSSH 采集
+  srv_client.c         wolfSSH 采集（CPU/内存/磁盘 + Docker 容器）
   usage_store.c        NVS 持久化
   portal_http.c        Captive Portal（DNS + HTTP）
   wifi_manager.c       WiFi STA/AP 管理
