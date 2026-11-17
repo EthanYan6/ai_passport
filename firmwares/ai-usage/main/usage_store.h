@@ -11,6 +11,7 @@
 #define USAGE_ARK_AK_MAX 128
 #define USAGE_ARK_SK_MAX 128
 #define USAGE_ARK_HOST_MAX 96
+#define USAGE_ARK_PLAN_MAX 32
 #define USAGE_ZCODE_KEY_MAX 128
 
 // NVS 初始化（nvs_flash_init + 满表擦除恢复）。启动时先调一次。
@@ -28,6 +29,8 @@ esp_err_t usage_store_get_ark(char *ak, size_t ak_len,
                               char *sk, size_t sk_len,
                               char *host, size_t host_len);
 esp_err_t usage_store_set_ark(const char *ak, const char *sk, const char *host);
+esp_err_t usage_store_get_ark_plan(char *plan, size_t plan_len);
+esp_err_t usage_store_set_ark_plan(const char *plan);
 bool usage_store_has_ark(void);
 
 // ---------------- 智谱 zcode API Key（命名空间 "zcode"） ----------------

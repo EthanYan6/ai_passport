@@ -12,7 +12,7 @@ typedef struct {
     int err;                     // 0=成功 1=未配置 API Key 2=获取失败
     char level[ZCODE_LEVEL_MAX]; // 套餐等级（如 "pro"），可为空
     bool has_row[ZCODE_ROWS];
-    int pct[ZCODE_ROWS];         // 0..100（服务端算好的百分比）
+    float pct[ZCODE_ROWS];       // 0..100（服务端算好的百分比，保留小数）
     long cur[ZCODE_ROWS];        // MCP 行：currentValue
     long total[ZCODE_ROWS];      // MCP 行：usage 总额
     long reset_s[ZCODE_ROWS];    // 距重置秒数（尽力解析 nextResetTime）；<0 未知

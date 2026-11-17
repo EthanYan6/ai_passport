@@ -69,14 +69,26 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     case WIFI_EVENT_STA_START:
         if (s_connect_requested) esp_wifi_connect();
         break;
-    case WIFI_EVENT_STA_DISCONNECTED:
+    case WIFI_EVENT_STA_DISCONNECTED: {
         if (s_ap_active) {
-            // 配网模式中：保持 AP，等用户在门户里重新提交
-            notify(WIFI_MGR_FAILED);
+            // 配网模式中：保持 AP。已提交过凭据则退避重连——重复点"保存"
+            // 时驱动只断开 STA 不重连（disconnect before connecting to new
+            // ap），不自己拉起就永远拿不到 IP、配网页退不出去
+            if (s_connect_requested) {
+                schedule_retry();
+            } else {
+                notify(WIFI_MGR_FAILED);
+            }
             return;
         }
         if (s_connect_requested) schedule_retry();
         break;
+    }
+    case WIFI_EVENT_STA_CONNECTED: {
+        // DHCP 由默认 STA handler 启动，与 minimal-checkin 保持一致
+        notify(WIFI_MGR_STA_ASSOC);
+        break;
+    }
     case WIFI_EVENT_AP_START:
         ESP_LOGI(TAG, "配网热点已启动");
         break;
@@ -160,7 +172,17 @@ esp_err_t wifi_manager_connect_saved(void)
     wifi_config_t cfg = { 0 };
     strlcpy((char *)cfg.sta.ssid, ssid, sizeof(cfg.sta.ssid));
     strlcpy((char *)cfg.sta.password, pass, sizeof(cfg.sta.password));
-    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    if (err != ESP_OK) return err;
+
+    esp_timer_stop(s_retry_timer);
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        // 已关联旧 AP 时先断开，由 disconnect 处理在驱动退出旧连接后发起新连接
+        err = esp_wifi_disconnect();
+        if (err == ESP_OK) schedule_retry();
+        return err;
+    }
     return esp_wifi_connect();
 }
 
@@ -205,10 +227,11 @@ esp_err_t wifi_manager_start_ap(char *ap_name, size_t name_len)
         },
     };
     strlcpy((char *)ap_cfg.ap.ssid, name, sizeof(ap_cfg.ap.ssid));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
+    // STA-only 下 AP 接口尚未启用，必须先切 APSTA；否则 set_config 触发断言重启
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) return err;
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
 
     s_ap_active = true;
     if (ap_name && name_len) strlcpy(ap_name, name, name_len);

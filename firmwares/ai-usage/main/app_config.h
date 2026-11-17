@@ -35,9 +35,9 @@
 // 一条 exec 命令采集全部数据（两次 /proc/stat 采样算 CPU，procfs 内存，
 // df 根分区，docker ps 容器列表）。S1/S2/MEM/DSK 为段落前缀，C| 为容器行。
 #define APP_SRV_CMD \
-    "awk 'NR==1{printf \"S1 %d %d %d\\n\",$2+$4,$5,$2+$4+$5}' /proc/stat; " \
+    "awk 'NR==1{idle=$5+$6; total=$2+$3+$4+$5+$6+$7+$8+$9+$10; printf \"S1 %d %d %d\\n\",total-idle,idle,total}' /proc/stat; " \
     "sleep 1; " \
-    "awk 'NR==1{printf \"S2 %d %d %d\\n\",$2+$4,$5,$2+$4+$5}' /proc/stat; " \
+    "awk 'NR==1{idle=$5+$6; total=$2+$3+$4+$5+$6+$7+$8+$9+$10; printf \"S2 %d %d %d\\n\",total-idle,idle,total}' /proc/stat; " \
     "awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf \"MEM %d %d %d\\n\",(t-a)*100/t,t-a,t}' /proc/meminfo; " \
     "df -kP / | awk 'NR==2{printf \"DSK %d %d %d\\n\",$3*100/$2,$3,$2}'; " \
     "docker ps --format 'C|{{.ID}}|{{.Names}}|{{.State}}|{{.Ports}}' 2>/dev/null || echo NODOCKER"
@@ -45,7 +45,8 @@
 #define APP_SRV_CONNECT_TIMEOUT_MS 5000   // TCP 连接超时
 #define APP_SRV_TOTAL_TIMEOUT_MS 15000    // 握手+采集总预算
 #define APP_SRV_RESP_MAX 16384            // 输出累积上限
-#define APP_SRV_CONTAINERS_MAX 5          // 屏上最多显示的容器行
+#define APP_SRV_CONTAINERS_MAX 20         // 采集保留的容器数（长按上/下翻页用）
+#define APP_SRV_CONTAINERS_PAGE 5         // 屏上每页显示的容器行
 
 // ---------------- 刷新间隔（秒） ----------------
 // 设置页 OK 循环切换，门户下拉选择；存 NVS。

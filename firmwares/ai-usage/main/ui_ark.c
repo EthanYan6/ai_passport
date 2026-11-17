@@ -2,7 +2,7 @@
 //
 // 布局（页容器 240x262，深色底）：
 //   大标题 "Coding Plan"（宽度受限自动降字号）+ 火山方舟/套餐 chips
-//   3 个窗口行：标题 + 右侧重置倒计时 + 进度条 + 百分比 + 明细
+//   3 个窗口行：标题 + 右侧重置倒计时 + 进度条 + 百分比 + 三角位置标记
 #include "ui_ark.h"
 #include "ui_common.h"
 
@@ -16,12 +16,14 @@ static lv_obj_t *s_plan_chip;
 static lv_obj_t *s_reset[ARK_WINDOWS];
 static lv_obj_t *s_bar[ARK_WINDOWS];
 static lv_obj_t *s_pct[ARK_WINDOWS];
-static lv_obj_t *s_detail[ARK_WINDOWS];
+static lv_obj_t *s_marker[ARK_WINDOWS];
 
 void ui_ark_build(lv_obj_t *p)
 {
     static const char *const win_titles[ARK_WINDOWS] = {
         "近5小时用量", "近一周用量", "近一月用量"};
+    static const lv_point_precise_t marker_points[] = {
+        { 0, 6 }, { 4, 0 }, { 8, 6 }, { 0, 6 }};
 
     s_title = ui_put_label(p, "Coding Plan", 10, 0, &lv_font_montserrat_40, C_TEXT);
     lv_obj_set_width(s_title, ARK_TITLE_W_MAX);
@@ -37,7 +39,11 @@ void ui_ark_build(lv_obj_t *p)
         lv_obj_align(s_reset[i], LV_ALIGN_TOP_RIGHT, -10, y);
         s_bar[i] = ui_make_bar(p, 10, y + 22, 148, 12, C_CYAN);
         s_pct[i] = ui_put_label(p, "--", 166, y + 21, &lv_font_montserrat_14, C_TEXT);
-        s_detail[i] = ui_put_label(p, "--", 10, y + 40, &app_font_14, C_MUTED);
+        s_marker[i] = lv_line_create(p);
+        lv_line_set_points(s_marker[i], marker_points, 4);
+        lv_obj_set_size(s_marker[i], 9, 7);
+        lv_obj_set_style_line_width(s_marker[i], 2, 0);
+        lv_obj_set_pos(s_marker[i], 6, y + 36);
     }
 }
 
@@ -93,20 +99,6 @@ static void format_reset(lv_obj_t *lbl, long remain)
     }
 }
 
-static const char *err_message(int err)
-{
-    switch (err) {
-    case 1:
-        return "未配置";
-    case 2:
-        return "获取失败";
-    case 3:
-        return "时间未同步";
-    default:
-        return "--";
-    }
-}
-
 void ui_ark_render(const ark_data_t *d, long elapsed_s)
 {
     bool ok = d->valid && d->err == 0;
@@ -120,25 +112,27 @@ void ui_ark_render(const ark_data_t *d, long elapsed_s)
         if (has) {
             float pct = d->used[i] * 100.0f / d->quota[i];
             int v = ui_clamp100(pct);
+            int y = 86 + i * 58;
             lv_bar_set_value(s_bar[i], v, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(s_bar[i],
                                       lv_color_hex(ui_level_color(pct)),
                                       LV_PART_INDICATOR);
-            ui_label_printf(s_pct[i], "%d", v);
+            ui_label_printf(s_pct[i], "%.2f%%", (double)pct);
+            lv_obj_set_style_line_color(s_marker[i],
+                                        lv_color_hex(ui_level_color(pct)), 0);
+            lv_obj_set_pos(s_marker[i], 10 + (v * 148) / 100 - 4, y + 36);
+            lv_obj_set_hidden(s_marker[i], false);
             long remain = d->reset_s[i] >= 0 ? d->reset_s[i] - elapsed_s : -1;
             if (remain >= 0) {
                 format_reset(s_reset[i], remain);
             } else {
                 lv_label_set_text(s_reset[i], "--");
             }
-            ui_label_printf(s_detail[i], "%.0f / %.0f", (double)d->used[i],
-                            (double)d->quota[i]);
         } else {
             lv_bar_set_value(s_bar[i], 0, LV_ANIM_OFF);
             lv_label_set_text(s_pct[i], "--");
             lv_label_set_text(s_reset[i], "--");
-            lv_label_set_text(s_detail[i],
-                              d->valid ? err_message(d->err) : "等待刷新");
+            lv_obj_set_hidden(s_marker[i], true);
         }
     }
 }

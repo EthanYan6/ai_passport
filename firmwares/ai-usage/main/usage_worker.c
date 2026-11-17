@@ -27,7 +27,9 @@ static void worker_task(void *arg)
 
         ark_data_t ark;
         ark_client_fetch(&ark);
-        usage_result_t res = { .kind = USAGE_RES_ARK, .ark = ark };
+        usage_result_t res = { 0 };
+        res.kind = USAGE_RES_ARK;
+        res.ark = ark;
         xQueueSend(s_result_queue, &res, 0);
         ESP_LOGI(TAG, "ark err=%d plan=%s", ark.err,
                  ark.plan[0] ? ark.plan : "-");
@@ -45,15 +47,14 @@ static void worker_task(void *arg)
         usage_srv_t servers[USAGE_SRV_MAX];
         int n = usage_store_srv_list(servers, USAGE_SRV_MAX);
         for (int i = 0; i < n; i++) {
-            srv_data_t srv;
-            srv_client_fetch(&servers[i], &srv);
             memset(&res, 0, sizeof(res));
             res.kind = USAGE_RES_SRV;
-            res.srv = srv;
+            srv_client_fetch(&servers[i], &res.srv);
             xQueueSend(s_result_queue, &res, 0);
-            ESP_LOGI(TAG, "srv[%d] %s err=%d cpu=%d mem=%d dsk=%d ct=%d",
-                     servers[i].idx, servers[i].ip, srv.err, srv.cpu_pct,
-                     srv.mem_pct, srv.disk_pct, srv.container_count);
+            ESP_LOGI(TAG, "srv[%d] %s err=%d cpu=%.1f mem=%d dsk=%d ct=%d",
+                     servers[i].idx, servers[i].ip, res.srv.err,
+                     (double)res.srv.cpu_pct, res.srv.mem_pct,
+                     res.srv.disk_pct, res.srv.container_count);
         }
 
         memset(&res, 0, sizeof(res));

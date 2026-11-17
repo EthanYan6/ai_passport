@@ -17,9 +17,11 @@ typedef enum {
 
 typedef struct {
     usage_res_kind_t kind;
-    ark_data_t ark;
-    zcode_data_t zcode;
-    srv_data_t srv;
+    union {               // 按类型只用其一；联合体让结果队列省 ~2/3 内存
+        ark_data_t ark;
+        zcode_data_t zcode;
+        srv_data_t srv;
+    };
 } usage_result_t;
 
 // 启动 worker 任务（内部自建结果队列，深度 4）。

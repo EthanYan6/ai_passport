@@ -7,6 +7,7 @@
 typedef enum {
     WIFI_MGR_IDLE = 0,        // 未连接
     WIFI_MGR_CONNECTING,      // 正在连接（含自动重试）
+    WIFI_MGR_STA_ASSOC,       // STA 已关联（还没拿到 IP）
     WIFI_MGR_CONNECTED,       // 已连上（拿到 IP）
     WIFI_MGR_FAILED,          // 连接失败（等用户重新配网或重试）
 } wifi_mgr_state_t;

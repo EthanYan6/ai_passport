@@ -29,11 +29,11 @@ TTF = HERE.parent / "managed_components" / "lvgl__lvgl" / "scripts" / \
     "generators" / "built_in_font" / "SourceHanSansSC-Normal.otf"
 
 SRC_DIR = HERE.parent / "main"
-# CJK cmap covers 0x4E00..0x9AF3 (range_start 19968, length 19700)。
-# pc-monitor 原字库只到 0x95EB（18412），本固件用到 间/隔/隐/页/问 等
+# CJK cmap covers 0x4E00..0x9ED8。
+# pc-monitor 原字库只到 0x95EB（18412），本固件用到 间/隔/隐/页/问/题 等
 # 超出范围的常用字，扩大声明范围即可（SPARSE_TINY 只按 unicode_list 查表）。
 CMAP_START = 19968
-CMAP_LEN = 19700
+CMAP_LEN = 0x9ED8 - CMAP_START + 1
 
 # Runtime-only text (e.g. approved commands echoed from the host) can contain
 # characters that never appear in static UI copy, so the source scan can't

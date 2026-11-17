@@ -187,7 +187,6 @@ static void handle_wifi_event(wifi_mgr_state_t state)
 {
     if (state == WIFI_MGR_CONNECTED) {
         time_sync_start();
-        s_ip_str[0] = '\0';   // 等 IP 事件回填
         if (s_mode == MODE_NORMAL) {
             s_last_fetch_ms = 0;   // 连上立即拉一轮
         }
@@ -200,6 +199,10 @@ static void handle_wifi_event(wifi_mgr_state_t state)
     case WIFI_MGR_CONNECTED:
         ui_provision_set_state(2);
         s_leave_at_ms = esp_timer_get_time() / 1000 + 1500;
+        break;
+    case WIFI_MGR_STA_ASSOC:
+        // 未拿到 IP 时保持门户，避免填写过程中 AP 自动关闭；可长按 OK 手动退出
+        ui_provision_set_state(1);
         break;
     case WIFI_MGR_CONNECTING:
         ui_provision_set_state(1);
@@ -220,13 +223,13 @@ static void handle_result(const usage_result_t *res)
     int64_t now = esp_timer_get_time() / 1000;
     if (res->kind == USAGE_RES_ARK) {
         s_ark = res->ark;
-        s_ark_ok = s_ark.valid && s_ark.err == 0;
+        s_ark_ok = s_ark.err == 1 || (s_ark.valid && s_ark.err == 0);
         s_ever_fetched = true;
         s_last_fetch_ms = now;
         ESP_LOGI(TAG, "火山 err=%d", s_ark.err);
     } else if (res->kind == USAGE_RES_ZCODE) {
         s_zcode = res->zcode;
-        s_zcode_ok = s_zcode.valid && s_zcode.err == 0;
+        s_zcode_ok = s_zcode.err == 1 || (s_zcode.valid && s_zcode.err == 0);
         s_ever_fetched = true;
         s_last_fetch_ms = now;
         ESP_LOGI(TAG, "zcode err=%d", s_zcode.err);
@@ -268,14 +271,22 @@ static void handle_button(bsp_btn_t btn, bsp_btn_ev_t ev)
                 request_refresh(true);
             }
         }
-    } else if (ev == BSP_BTN_LONG && btn == BSP_BTN_OK) {
-        if (s_view >= page_settings()) {
-            bsp_lvgl_unlock();
-            enter_provision();
-            return;
+    } else if (ev == BSP_BTN_LONG) {
+        if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
+            // 服务器页：长按上/下翻容器列表（页面已构建才碰 LVGL 对象）
+            if (s_view >= PAGE_SRV_BASE && s_view < page_settings() &&
+                s_built_view == s_view) {
+                ui_server_page_step(btn == BSP_BTN_UP ? -1 : 1);
+            }
+        } else if (btn == BSP_BTN_OK) {
+            if (s_view >= page_settings()) {
+                bsp_lvgl_unlock();
+                enter_provision();
+                return;
+            }
+            s_paused = !s_paused;
+            ESP_LOGI(TAG, "auto refresh %s", s_paused ? "paused" : "resumed");
         }
-        s_paused = !s_paused;
-        ESP_LOGI(TAG, "auto refresh %s", s_paused ? "paused" : "resumed");
     }
     bsp_lvgl_unlock();
 }
@@ -352,8 +363,8 @@ static void render(void)
         lv_label_set_text(s_title, "设置");
     }
 
-    // 状态点：AP=配网中；NO WIFI=未连接；WIFI=最近一轮两家都成功；
-    // WAIT/FAIL=已连接但还没成功拉到全部数据
+    // 状态点：AP=配网中；NO WIFI=未连接；NO KEY=两家均未配置；
+    // WIFI=已配置接口全部成功；FAIL=已配置接口失败；WAIT=等待首轮结果
     bool connected = wifi_manager_state() == WIFI_MGR_CONNECTED;
     uint32_t dot_color;
     const char *link;
@@ -363,6 +374,9 @@ static void render(void)
     } else if (!connected) {
         dot_color = C_RED;
         link = "NO WIFI";
+    } else if (s_ever_fetched && s_ark.err == 1 && s_zcode.err == 1) {
+        dot_color = C_AMBER;
+        link = "NO KEY";
     } else if (s_ever_fetched && s_ark_ok && s_zcode_ok) {
         dot_color = C_GREEN;
         link = "WIFI";
@@ -391,6 +405,8 @@ static void render(void)
         lv_label_set_text(s_hint, "OK:time  HOLD:provision");
     } else if (s_paused) {
         lv_label_set_text(s_hint, "PAUSED  OK:refr  HOLD:resume");
+    } else if (s_view >= PAGE_SRV_BASE && s_view < page_settings()) {
+        lv_label_set_text(s_hint, "HOLD UP/DN:ct page  OK:refr");
     } else {
         lv_label_set_text(s_hint, "UP/DN page  OK:refr  HOLD:pause");
     }

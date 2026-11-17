@@ -143,7 +143,7 @@ static int tcp_connect(const char *host, int64_t deadline)
 // 端口串压缩："0.0.0.0:8000->8000/tcp, :::443->443/tcp" → "8000->8000,443->443"
 static void compact_ports(const char *raw, char *out, size_t outlen)
 {
-    char tmp[256];
+    char tmp[512];
     strlcpy(tmp, raw ? raw : "", sizeof(tmp));
     size_t o = 0;
     out[0] = '\0';
@@ -154,6 +154,7 @@ static void compact_ports(const char *raw, char *out, size_t outlen)
         while (*tok == ' ') tok++;
         char *arrow = strstr(tok, "->");
         char *slash = strchr(tok, '/');
+        int n = 0;
         if (arrow) {
             *arrow = '\0';
             const char *right = arrow + 2;
@@ -164,13 +165,16 @@ static void compact_ports(const char *raw, char *out, size_t outlen)
             strlcpy(rport, right, sizeof(rport));
             char *rs = strchr(rport, '/');
             if (rs) *rs = '\0';
-            o += snprintf(out + o, outlen - o, o ? ",%s->%s" : "%s->%s",
-                          left, rport);
+            n = snprintf(out + o, outlen - o, o ? ",%s->%s" : "%s->%s",
+                         left, rport);
         } else if (tok[0]) {
             // 仅暴露未映射的端口："8000/tcp" → "8000"
             if (slash) *slash = '\0';
-            o += snprintf(out + o, outlen - o, o ? ",%s" : "%s", tok);
+            n = snprintf(out + o, outlen - o, o ? ",%s" : "%s", tok);
         }
+        if (n < 0) break;
+        if ((size_t)n >= outlen - o) break;
+        o += (size_t)n;
     }
 }
 
@@ -223,7 +227,7 @@ static bool parse_output(const char *text, srv_data_t *out)
                 if (fields[0]) strlcpy(ct->id, fields[0], sizeof(ct->id));
                 if (fields[1]) strlcpy(ct->name, fields[1], sizeof(ct->name));
                 ct->state = (fields[2] && strcmp(fields[2], "running") == 0) ? 0 : 1;
-                if (fields[4]) compact_ports(fields[4], ct->ports, sizeof(ct->ports));
+                if (fields[3]) compact_ports(fields[3], ct->ports, sizeof(ct->ports));
             }
         } else if (strcmp(line, "NODOCKER") == 0) {
             count = 0;
@@ -233,10 +237,9 @@ static bool parse_output(const char *text, srv_data_t *out)
 
     if (s1[2] > 0 && s2[2] > 0) {
         long du = s2[0] - s1[0];   // 非空闲 jiffies 增量
-        long di = s2[1] - s1[1];
         long dt = s2[2] - s1[2];
         if (dt > 0) {
-            out->cpu_pct = (int)((du + di) * 100 / dt);
+            out->cpu_pct = (float)du * 100.0f / (float)dt;
             have_cpu = true;
         }
     }

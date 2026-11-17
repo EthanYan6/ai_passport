@@ -8,7 +8,7 @@
 typedef struct {
     char id[13];     // 容器短 ID（12 hex）
     char name[24];
-    char ports[30];  // 压缩后的端口映射（"8000->8000,443->443"）
+    char ports[128]; // 压缩后的端口映射；UI 对超长文本横向滚动
     uint8_t state;   // 0=running 1=其他
 } srv_container_t;
 
@@ -18,7 +18,7 @@ typedef struct {
     uint8_t slot;    // NVS 槽位号（结果回传用）
     char ip[USAGE_SRV_IP_MAX];
     char user[USAGE_SRV_USER_MAX];
-    int cpu_pct;                        // 0..100
+    float cpu_pct;                      // 0..100，支持小数
     int mem_pct;                        // 0..100
     int mem_used_mb, mem_total_mb;      // 明细
     int disk_pct;                       // 根分区 0..100

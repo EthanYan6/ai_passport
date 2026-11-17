@@ -79,7 +79,9 @@ static void ark_sign(const char *ak, const char *sk, const char *host,
     struct tm gmt;
     gmtime_r(&now, &gmt);
     strftime(x_date, x_date_len, "%Y%m%dT%H%M%SZ", &gmt);
-    const char *short_date = x_date;   // 前 8 位即 yyyyMMdd
+    char short_date[9];
+    memcpy(short_date, x_date, 8);
+    short_date[8] = '\0';
 
     sha256_hex(PAYLOAD, payload_hash);
 
@@ -303,6 +305,7 @@ void ark_client_fetch(ark_data_t *result)
         result->err = 1;
         return;
     }
+    usage_store_get_ark_plan(result->plan, sizeof(result->plan));
     if (!time_sync_valid()) {
         result->err = 3;
         return;

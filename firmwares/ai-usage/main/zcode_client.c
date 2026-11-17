@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <limits.h>
 #include <time.h>
 
 static const char *TAG = "zcode_client";
@@ -27,14 +28,14 @@ static const char *TAG = "zcode_client";
 #define TOKEN_LIMITS_MAX 4
 
 typedef struct {
-    int pct;
+    float pct;
     long reset;
 } zcode_token_t;
 
 // 排序键：未知重置时间(-1)排最后
 static long token_sort_key(long reset)
 {
-    return reset < 0 ? (1L << 62) : reset;
+    return reset < 0 ? LONG_MAX : reset;
 }
 
 // nextResetTime 兼容数字/数字字符串，>1e11 视为毫秒时间戳。无有效值返回 -1。
@@ -67,6 +68,7 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
+        ESP_LOGW(TAG, "client init failed");
         out->err = 2;
         return;
     }
@@ -76,8 +78,16 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
         esp_http_client_set_header(client, "Authorization", key);
         esp_http_client_set_header(client, "Content-Type", "application/json");
 
-        if (esp_http_client_open(client, -1) != ESP_OK) break;
-        esp_http_client_fetch_headers(client);
+        esp_err_t open_err = esp_http_client_open(client, 0);
+        if (open_err != ESP_OK) {
+            ESP_LOGW(TAG, "open failed: %s", esp_err_to_name(open_err));
+            break;
+        }
+        int64_t header_len = esp_http_client_fetch_headers(client);
+        if (header_len < 0) {
+            ESP_LOGW(TAG, "fetch headers failed (%lld)", (long long)header_len);
+            break;
+        }
         int status = esp_http_client_get_status_code(client);
         if (status != 200) {
             ESP_LOGW(TAG, "zcode HTTP %d", status);
@@ -85,14 +95,24 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
         }
 
         resp = malloc(RESP_MAX + 1);
-        if (!resp) break;
+        if (!resp) {
+            ESP_LOGW(TAG, "response buffer allocation failed");
+            break;
+        }
         int total = 0;
         int n;
         while (total < RESP_MAX &&
                (n = esp_http_client_read(client, resp + total, RESP_MAX - total)) > 0) {
             total += n;
         }
+        if (n < 0) {
+            ESP_LOGW(TAG, "read failed after %d bytes (%d)", total, n);
+            free(resp);
+            resp = NULL;
+            break;
+        }
         resp[total] = '\0';
+        ESP_LOGI(TAG, "HTTP 200, response %d bytes", total);
     } while (0);
 
     esp_http_client_close(client);
@@ -104,6 +124,7 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
     }
 
     cJSON *root = cJSON_Parse(resp);
+    if (!root) ESP_LOGW(TAG, "invalid JSON (%u bytes)", (unsigned)strlen(resp));
     free(resp);
     if (!root) {
         out->err = 2;
@@ -114,6 +135,11 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
     cJSON *code = cJSON_GetObjectItem(root, "code");
     if ((cJSON_IsBool(success) && !cJSON_IsTrue(success)) ||
         (cJSON_IsNumber(code) && code->valuedouble != 200)) {
+        const char *msg = cJSON_GetStringValue(cJSON_GetObjectItem(root, "msg"));
+        if (!msg) msg = cJSON_GetStringValue(cJSON_GetObjectItem(root, "message"));
+        ESP_LOGW(TAG, "API rejected: code=%d message=%s",
+                 cJSON_IsNumber(code) ? (int)code->valuedouble : -1,
+                 msg ? msg : "-");
         cJSON_Delete(root);
         out->err = 2;
         return;
@@ -121,6 +147,7 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
 
     cJSON *data = cJSON_GetObjectItem(root, "data");
     if (!cJSON_IsObject(data)) {
+        ESP_LOGW(TAG, "missing data object");
         cJSON_Delete(root);
         out->err = 2;
         return;
@@ -131,6 +158,7 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
 
     cJSON *limits = cJSON_GetObjectItem(data, "limits");
     if (!cJSON_IsArray(limits)) {
+        ESP_LOGW(TAG, "data.limits is not an array");
         cJSON_Delete(root);
         out->err = 2;
         return;
@@ -146,9 +174,9 @@ static void fetch_and_parse(const char *key, zcode_data_t *out)
         const char *type = cJSON_GetStringValue(cJSON_GetObjectItem(item, "type"));
         cJSON *pct = cJSON_GetObjectItem(item, "percentage");
         if (!cJSON_IsNumber(pct)) continue;
-        int p = (int)pct->valuedouble;
-        if (p < 0) p = 0;
-        if (p > 100) p = 100;
+        float p = (float)pct->valuedouble;
+        if (p < 0.0f) p = 0.0f;
+        if (p > 100.0f) p = 100.0f;
 
         if (type && strcmp(type, "TOKENS_LIMIT") == 0 && token_n < TOKEN_LIMITS_MAX) {
             tokens[token_n].pct = p;

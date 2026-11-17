@@ -25,9 +25,9 @@ CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 # LVGL 内置 malloc 池大小(字节)。它是独立静态区、不与系统堆共享,配大了会白白占用 RAM。
-# 沿用 pc-monitor 验证过的 80KB(本固件仅 3 页 + 配网页，余量更大)。
+# 沿用 pc-monitor 验证过的 32KB，为 TLS/SSH 握手保留系统堆空间。
 # 注意:LVGL 9.6 已废弃 LV_MEM_SIZE_KILOBYTES,必须直接配 LV_MEM_SIZE 字节数。
-CONFIG_LV_MEM_SIZE=81920
+CONFIG_LV_MEM_SIZE=32768
 
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000

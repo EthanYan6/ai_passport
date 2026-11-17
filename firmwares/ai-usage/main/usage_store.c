@@ -2,7 +2,7 @@
 //
 // 四个命名空间：
 //   wifi  ssid/pass      配网门户写入，wifi_manager 读取
-//   ark   ak/sk/host     火山方舟 V4 签名密钥（host 可选）
+//   ark   ak/sk/host/plan 火山方舟 V4 签名密钥与套餐标签（host 可选）
 //   zcode apikey         智谱 GLM Coding Plan 用量查询密钥
 //   ui    refresh        自动刷新间隔（秒，uint32）
 #include "usage_store.h"
@@ -102,6 +102,18 @@ esp_err_t usage_store_set_ark(const char *ak, const char *sk, const char *host)
     if (err == ESP_OK) err = set_str("ark", "sk", sk ? sk : "");
     if (err == ESP_OK && host) err = set_str("ark", "host", host);
     return err;
+}
+
+esp_err_t usage_store_get_ark_plan(char *plan, size_t plan_len)
+{
+    esp_err_t err = get_str("ark", "plan", plan, plan_len);
+    if (!plan[0]) strlcpy(plan, "pro", plan_len);
+    return err;
+}
+
+esp_err_t usage_store_set_ark_plan(const char *plan)
+{
+    return set_str("ark", "plan", plan ? plan : "");
 }
 
 bool usage_store_has_ark(void)

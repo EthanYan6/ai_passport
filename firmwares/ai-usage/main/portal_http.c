@@ -18,7 +18,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -28,9 +30,8 @@ static const char *TAG = "portal";
 #define PORTAL_PORT      80
 #define DNS_PORT         53
 #define AP_IP            "192.168.4.1"
-#define RX_BUF_SIZE      2048
+#define RX_BUF_SIZE      4096
 #define HTTP_TIMEOUT_MS  3000
-#define MAX_RESPONSE     (16 * 1024)
 
 static char s_ap_name[24];
 static volatile bool s_running;
@@ -125,6 +126,50 @@ static bool form_get(const char *body, const char *key, char *out, size_t out_le
     return false;
 }
 
+// 从头部块中取 Content-Length（没有该头返回 0）
+static size_t header_content_length(const char *hdr)
+{
+    const char *p = hdr;
+    while (p && *p) {
+        const char *eol = strstr(p, "\r\n");
+        size_t line = eol ? (size_t)(eol - p) : strlen(p);
+        if (line >= 15 && strncasecmp(p, "content-length:", 15) == 0) {
+            return (size_t)strtoul(p + 15, NULL, 10);
+        }
+        p = eol ? eol + 2 : NULL;
+    }
+    return 0;
+}
+
+// 收满一个请求：recv 到头部结束（\r\n\r\n），再按 Content-Length 收满 body。
+// 浏览器的 fetch 常把请求头与 body 拆成两个 TCP 段发送，单次 recv 只会拿到
+// 头部、body 为空，表单字段全丢（此前"保存火山密钥"把 NVS 清空即此因）。
+// 返回总字节数（0=断开/超时），*body 指向请求体（可能在超时后仍不完整）。
+static int recv_request(int conn, char *rx, size_t cap, char **body)
+{
+    size_t got = 0;
+    char *sep = NULL;
+    size_t cl = 0;
+    rx[0] = '\0';
+    *body = NULL;
+    while (got + 1 < cap) {
+        int n = recv(conn, rx + got, (int)(cap - 1 - got), 0);
+        if (n <= 0) break;
+        got += (size_t)n;
+        rx[got] = '\0';
+        if (!sep) {
+            sep = strstr(rx, "\r\n\r\n");
+            if (!sep) continue;   // 头部还没收全
+            *sep = '\0';          // 截断成独立头部串，请求行不受影响
+            cl = header_content_length(rx);
+            *body = sep + 4;
+            if (cl == 0) break;   // 无 body（GET 等）
+        }
+        if (got - (size_t)(*body - rx) >= cl) break;   // body 收满
+    }
+    return (int)got;
+}
+
 static void send_all(int sock, const char *data, size_t len)
 {
     size_t sent = 0;
@@ -190,19 +235,43 @@ static const char *PORTAL_HTML_HEAD =
     ".hint{color:#6e8ca0;font-size:13px}"
     "</style></head><body><h1>AI 用量胸牌 · 配网</h1>";
 
+// 无 Content-Length 的流式响应头：响应体由 Connection: close 界定。
+// 门户页整页拼装需要 16KB 连续堆缓冲（结果队列/接收缓冲膨胀后拿不到），
+// 改为片段边拼边发。
+static void send_stream_header(int sock, int code, const char *type)
+{
+    static char header[160];
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n"
+             "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+             code, code == 200 ? "OK" : "Error", type);
+    send_all(sock, header, strlen(header));
+}
+
+static void send_lit(int sock, const char *s)
+{
+    send_all(sock, s, strlen(s));
+}
+
+// 格式化单个片段并直接发送（静态缓冲复用，不占堆）
+static void send_frag(int sock, const char *fmt, ...)
+{
+    static char frag[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(frag, sizeof(frag), fmt, ap);
+    va_end(ap);
+    send_all(sock, frag, strlen(frag));
+}
+
 // 门户页由多个片段拼装，避免巨型字符串常量
 static void send_portal_page(int sock)
 {
-    char *page = malloc(MAX_RESPONSE);
-    if (!page) {
-        send_response(sock, 500, "text/plain", "no mem", 6);
-        return;
-    }
-    int off = 0;
-    off += snprintf(page + off, MAX_RESPONSE - off, "%s", PORTAL_HTML_HEAD);
+    send_stream_header(sock, 200, "text/html; charset=utf-8");
+    send_lit(sock, PORTAL_HTML_HEAD);
 
     // ---- 卡 1：WiFi ----
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_lit(sock,
         "<div class='card'><h2>1. WiFi</h2>"
         "<div id='nets'>加载中…</div>"
         "<script>fetch('/scan').then(r=>r.json()).then(j=>{"
@@ -216,25 +285,30 @@ static void send_portal_page(int sock)
         "<input id='pass' type='password' placeholder='WiFi 密码'>"
         "<button onclick=\"save()\">保存并连接</button>"
         "<div class='msg' id='msg'></div>"
-        "<script>function save(){"
+        "<script>async function save(){"
         "var s=document.getElementById('ssid').value;"
         "var p=document.getElementById('pass').value;"
-        "if(!s){document.getElementById('msg').textContent='请输入 WiFi 名称';return}"
-        "fetch('/save',{method:'POST',body:'ssid='+encodeURIComponent(s)"
-        "+'&password='+encodeURIComponent(p)});"
         "var m=document.getElementById('msg');"
-        "m.textContent='已提交，设备正在连接…'}</script></div>");
+        "if(!s){m.textContent='请输入 WiFi 名称';return}"
+        "m.textContent='正在保存…';"
+        "try{var r=await fetch('/save',{method:'POST',body:'ssid='+encodeURIComponent(s)"
+        "+'&password='+encodeURIComponent(p)});"
+        "if(!r.ok)throw new Error();"
+        "m.textContent='已保存，连接结果请查看设备屏幕'"
+        "}catch(e){m.textContent='保存失败，请确认仍连接设备热点后重试'}}</script></div>");
 
     // ---- 卡 2：火山方舟密钥 ----
     char ak[USAGE_ARK_AK_MAX] = { 0 }, sk[USAGE_ARK_SK_MAX] = { 0 },
-         host[USAGE_ARK_HOST_MAX] = { 0 };
+         host[USAGE_ARK_HOST_MAX] = { 0 }, plan[USAGE_ARK_PLAN_MAX] = { 0 };
     usage_store_get_ark(ak, sizeof(ak), sk, sizeof(sk), host, sizeof(host));
+    usage_store_get_ark_plan(plan, sizeof(plan));
     if (!host[0]) host[0] = '\0';   // 留空用固件默认
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_frag(sock,
         "<div class='card'><h2>2. 火山方舟（Coding Plan 用量）</h2>"
         "<input id='ak' value='%s' placeholder='AccessKey (AK)'>"
         "<input id='sk' type='password' value='%s' placeholder='SecretKey (SK)'>"
         "<input id='host' value='%s' placeholder='Host（可留空）'>"
+        "<input id='plan' value='%s' maxlength='31' placeholder='套餐标签（默认 pro）'>"
         "<button onclick=\"saveark()\">保存火山密钥</button>"
         "<div class='msg' id='amsg'></div>"
         "<p class='hint'>火山引擎控制台 → 访问控制 IAM → API 访问密钥。"
@@ -243,14 +317,15 @@ static void send_portal_page(int sock)
         "fetch('/ark',{method:'POST',body:"
         "'ak='+encodeURIComponent(document.getElementById('ak').value)"
         "+'&sk='+encodeURIComponent(document.getElementById('sk').value)"
-        "+'&host='+encodeURIComponent(document.getElementById('host').value)});"
+        "+'&host='+encodeURIComponent(document.getElementById('host').value)"
+        "+'&plan='+encodeURIComponent(document.getElementById('plan').value)});"
         "document.getElementById('amsg').textContent='已保存 ✓'}</script></div>",
-        ak, sk, host);
+        ak, sk, host, plan);
 
     // ---- 卡 3：智谱 API Key ----
     char zkey[USAGE_ZCODE_KEY_MAX] = { 0 };
     usage_store_get_zcode_key(zkey, sizeof(zkey));
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_frag(sock,
         "<div class='card'><h2>3. 智谱 zcode（GLM Coding Plan 用量）</h2>"
         "<input id='zkey' type='password' value='%s' placeholder='API Key'>"
         "<button onclick=\"savezcode()\">保存智谱 Key</button>"
@@ -263,7 +338,7 @@ static void send_portal_page(int sock)
         zkey);
 
     // ---- 卡 4：刷新间隔 ----
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_lit(sock,
         "<div class='card'><h2>4. 刷新间隔</h2><select id='refresh'>");
     uint32_t cur = usage_store_get_refresh_s();
     char opt[96];
@@ -285,9 +360,9 @@ static void send_portal_page(int sock)
                      (unsigned long)s, s == cur ? " selected" : "",
                      (unsigned long)s);
         }
-        off += snprintf(page + off, MAX_RESPONSE - off, "%s", opt);
+        send_all(sock, opt, strlen(opt));
     }
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_lit(sock,
         "</select><button onclick=\"saverefresh()\">保存间隔</button>"
         "<div class='msg' id='rmsg'></div>"
         "<p class='hint'>设备上也可以调：设置页按 OK 循环切换。</p>"
@@ -297,7 +372,7 @@ static void send_portal_page(int sock)
         "document.getElementById('rmsg').textContent='已保存 ✓'}</script></div>");
 
     // ---- 卡 5：服务器管理（SSH 监控） ----
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_lit(sock,
         "<div class='card'><h2>5. 服务器（SSH 监控，最多 4 台）</h2>"
         "<div id='srvlist'></div>"
         "<input id='sip' placeholder='IP 或域名'>"
@@ -355,14 +430,10 @@ static void send_portal_page(int sock)
         "loadSrv();"
         "</script></div>");
 
-    off += snprintf(page + off, MAX_RESPONSE - off,
+    send_frag(sock,
         "<p style='text-align:center;color:#6e8ca0;font-size:13px'>"
         "热点：%s · 密码：%s</p></body></html>",
         s_ap_name, APP_AP_PASS_8371);
-
-    (void)off;
-    send_response(sock, 200, "text/html; charset=utf-8", page, strlen(page));
-    free(page);
 }
 
 // ---------------- 请求处理 ----------------
@@ -417,7 +488,13 @@ static void handle_save(int sock, const char *body)
         return;
     }
     ESP_LOGI(TAG, "配网页提交: ssid=%s", ssid);
-    wifi_manager_connect(ssid, pass);
+    esp_err_t err = wifi_manager_connect(ssid, pass);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "保存或发起 WiFi 连接失败: %s", esp_err_to_name(err));
+        static const char fail[] = "connect request failed";
+        send_response(sock, 500, "text/plain", fail, sizeof(fail) - 1);
+        return;
+    }
     static const char ok[] = "OK";
     send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
 }
@@ -425,12 +502,30 @@ static void handle_save(int sock, const char *body)
 static void handle_ark(int sock, const char *body)
 {
     char ak[USAGE_ARK_AK_MAX] = { 0 }, sk[USAGE_ARK_SK_MAX] = { 0 },
-         host[USAGE_ARK_HOST_MAX] = { 0 };
-    form_get(body, "ak", ak, sizeof(ak));
-    form_get(body, "sk", sk, sizeof(sk));
-    form_get(body, "host", host, sizeof(host));
-    usage_store_set_ark(ak, sk, host);
-    ESP_LOGI(TAG, "火山密钥已保存 (ak 长度 %u)", (unsigned)strlen(ak));
+         host[USAGE_ARK_HOST_MAX] = { 0 }, plan[USAGE_ARK_PLAN_MAX] = { 0 };
+    // 字段在请求体中缺失（body 不完整）时保留 NVS 原值，防止误清空；
+    // 字段存在但为空则是表单本意（host 可留空清掉覆盖值）。
+    bool has_ak = form_get(body, "ak", ak, sizeof(ak));
+    bool has_sk = form_get(body, "sk", sk, sizeof(sk));
+    bool has_host = form_get(body, "host", host, sizeof(host));
+    bool has_plan = form_get(body, "plan", plan, sizeof(plan));
+    char oak[USAGE_ARK_AK_MAX] = { 0 }, osk[USAGE_ARK_SK_MAX] = { 0 },
+         ohost[USAGE_ARK_HOST_MAX] = { 0 }, oplan[USAGE_ARK_PLAN_MAX] = { 0 };
+    usage_store_get_ark(oak, sizeof(oak), osk, sizeof(osk),
+                        ohost, sizeof(ohost));
+    usage_store_get_ark_plan(oplan, sizeof(oplan));
+    usage_store_set_ark(has_ak ? ak : oak,
+                        has_sk ? sk : osk,
+                        has_host ? host : ohost);
+    usage_store_set_ark_plan(has_plan ? plan : oplan);
+    usage_store_get_ark(oak, sizeof(oak), osk, sizeof(osk),
+                        ohost, sizeof(ohost));
+    ESP_LOGI(TAG, "火山密钥已保存 (ak len %u sk len %u)",
+             (unsigned)strlen(oak), (unsigned)strlen(osk));
+    if (!has_ak || !has_sk) {
+        ESP_LOGW(TAG, "火山请求体不完整（ak=%d sk=%d），保留原值",
+                 has_ak, has_sk);
+    }
     static const char ok[] = "OK";
     send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
 }
@@ -438,9 +533,12 @@ static void handle_ark(int sock, const char *body)
 static void handle_zcode(int sock, const char *body)
 {
     char key[USAGE_ZCODE_KEY_MAX] = { 0 };
-    form_get(body, "apikey", key, sizeof(key));
-    usage_store_set_zcode_key(key);
-    ESP_LOGI(TAG, "智谱 Key 已保存 (长度 %u)", (unsigned)strlen(key));
+    bool has_key = form_get(body, "apikey", key, sizeof(key));
+    char okey[USAGE_ZCODE_KEY_MAX] = { 0 };
+    usage_store_get_zcode_key(okey, sizeof(okey));
+    usage_store_set_zcode_key(has_key ? key : okey);
+    usage_store_get_zcode_key(okey, sizeof(okey));
+    ESP_LOGI(TAG, "智谱 Key 已保存 (长度 %u)", (unsigned)strlen(okey));
     static const char ok[] = "OK";
     send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
 }
@@ -578,6 +676,7 @@ static void http_task_fn(void *arg)
     }
 
     char *rx = malloc(RX_BUF_SIZE);
+    char *body;
     while (s_running && rx) {
         struct sockaddr_in cli;
         socklen_t cli_len = sizeof(cli);
@@ -588,11 +687,17 @@ static void http_task_fn(void *arg)
                               .tv_usec = (HTTP_TIMEOUT_MS % 1000) * 1000 };
         setsockopt(conn, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-        int n = recv(conn, rx, RX_BUF_SIZE - 1, 0);
-        if (n > 0) {
-            rx[n] = '\0';
-            char *body = strstr(rx, "\r\n\r\n");
-            if (body) body += 4;
+        int n = recv_request(conn, rx, RX_BUF_SIZE, &body);
+        if (n > 0 && body) {
+            // 记录请求行，串口对账用（手机请求有没有进来、进来的是什么）
+            char reqline[48];
+            const char *cr = strchr(rx, '\r');
+            size_t rl = cr ? (size_t)(cr - rx) : strlen(rx);
+            if (rl >= sizeof(reqline)) rl = sizeof(reqline) - 1;
+            memcpy(reqline, rx, rl);
+            reqline[rl] = '\0';
+            ESP_LOGI(TAG, "HTTP %s", reqline);
+
             bool is_get = strncmp(rx, "GET ", 4) == 0;
             bool is_post = strncmp(rx, "POST ", 5) == 0;
 
