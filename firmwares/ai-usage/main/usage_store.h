@@ -13,6 +13,8 @@
 #define USAGE_ARK_HOST_MAX 96
 #define USAGE_ARK_PLAN_MAX 32
 #define USAGE_ZCODE_KEY_MAX 128
+#define USAGE_BAILIAN_AK_MAX 128
+#define USAGE_BAILIAN_SK_MAX 128
 
 // NVS 初始化（nvs_flash_init + 满表擦除恢复）。启动时先调一次。
 esp_err_t usage_store_init(void);
@@ -38,9 +40,24 @@ esp_err_t usage_store_get_zcode_key(char *key, size_t key_len);
 esp_err_t usage_store_set_zcode_key(const char *key);
 bool usage_store_has_zcode(void);
 
+// ---------------- 阿里云百炼 AK/SK（命名空间 "bailian"） ----------------
+esp_err_t usage_store_get_bailian(char *ak, size_t ak_len,
+                                  char *sk, size_t sk_len);
+esp_err_t usage_store_set_bailian(const char *ak, const char *sk);
+bool usage_store_has_bailian(void);
+
 // ---------------- 刷新间隔（命名空间 "ui"，秒） ----------------
 uint32_t usage_store_get_refresh_s(void);
 void usage_store_set_refresh_s(uint32_t seconds);
+
+// ---------------- 平台页显示开关（命名空间 "ui"，缺省显示） ----------------
+// 取消勾选后设备轮播不含该平台页，且不查询其用量。
+bool usage_store_get_show_ark(void);
+void usage_store_set_show_ark(bool show);
+bool usage_store_get_show_zcode(void);
+void usage_store_set_show_zcode(bool show);
+bool usage_store_get_show_bailian(void);
+void usage_store_set_show_bailian(bool show);
 
 // ---------------- 服务器（SSH 监控，命名空间 "srv0".."srv3"，槽位即 idx） ----------------
 // used = ip 非空；槽位固定 0..3，删除即清空槽位（页面数 = count）。
@@ -52,6 +69,7 @@ void usage_store_set_refresh_s(uint32_t seconds);
 typedef struct {
     int idx;                        // 槽位号（get/list 时回填）
     char ip[USAGE_SRV_IP_MAX];
+    uint16_t port;                  // SSH 端口（旧配置缺省为 22）
     char user[USAGE_SRV_USER_MAX];
     char pass[USAGE_SRV_PASS_MAX];
 } usage_srv_t;
@@ -61,11 +79,12 @@ int usage_store_srv_count(void);
 // 按槽位升序列出已配置的服务器，返回条数（<= max）
 int usage_store_srv_list(usage_srv_t *out, int max);
 // 在第一个空槽添加，成功返回槽位号；满返回 -1
-int usage_store_srv_add(const char *ip, const char *user, const char *pass);
+int usage_store_srv_add(const char *ip, const char *user, const char *pass,
+                        uint16_t port);
 // 读指定槽位；未配置返回 false
 bool usage_store_srv_get(int idx, usage_srv_t *out);
 // 修改指定槽位（idx 由门户提交）
 void usage_store_srv_set(int idx, const char *ip, const char *user,
-                         const char *pass);
-// 删除指定槽位（清空三键）
+                         const char *pass, uint16_t port);
+// 删除指定槽位（清空配置）
 void usage_store_srv_del(int idx);

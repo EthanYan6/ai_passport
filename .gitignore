@@ -15,3 +15,5 @@ publisher-skill/
 folotoy-ai-passport-publisher.zip
 
 ark_config.json
+# ESP-IDF 校验构建目录（同 build，不纳入版本库）
+firmwares/*/build-validation/

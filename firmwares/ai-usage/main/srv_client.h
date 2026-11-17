@@ -7,7 +7,8 @@
 
 typedef struct {
     char id[13];     // 容器短 ID（12 hex）
-    char name[24];
+    char name[48];   // 超过 23 字符的 Compose 名称曾在此被硬截断，放大缓冲；
+                     // 仍超长时由 UI 省略号截断
     char ports[128]; // 压缩后的端口映射；UI 对超长文本横向滚动
     uint8_t state;   // 0=running 1=其他
 } srv_container_t;
@@ -17,6 +18,7 @@ typedef struct {
     int err;         // 0=成功 1=未配置 2=连接失败 3=认证失败 4=采集/解析失败
     uint8_t slot;    // NVS 槽位号（结果回传用）
     char ip[USAGE_SRV_IP_MAX];
+    uint16_t port;
     char user[USAGE_SRV_USER_MAX];
     float cpu_pct;                      // 0..100，支持小数
     int mem_pct;                        // 0..100

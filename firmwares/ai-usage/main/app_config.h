@@ -25,6 +25,18 @@
 #define APP_ARK_API_VERSION "2024-01-01"
 #define APP_ARK_HTTP_TIMEOUT_MS 10000
 
+// ---------------- 阿里云百炼 Coding Plan ----------------
+// 官方 CLI 使用的 OpenAPI 与控制台网关（设备端不暴露密钥）。
+// 与 bailian-cli 2.10.1 一致：OpenAPI AK/SK 换取控制台令牌，再查询真实额度
+#define APP_BAILIAN_OPENAPI_HOST "modelstudio.cn-beijing.aliyuncs.com"
+#define APP_BAILIAN_OPENAPI_PATH "/modelstudio/cli/generateAccessToken"
+#define APP_BAILIAN_OPENAPI_URL "https://" APP_BAILIAN_OPENAPI_HOST APP_BAILIAN_OPENAPI_PATH
+#define APP_BAILIAN_OPENAPI_VERSION "2026-02-10"
+#define APP_BAILIAN_CONSOLE_API "broadscope-bailian.codingPlan.queryCodingPlanInstanceInfoV2"
+#define APP_BAILIAN_CONSOLE_URL "https://bailian-cs.console.aliyun.com/cli/api.json?action=BroadScopeAspnGateway&product=sfm_bailian&api=" APP_BAILIAN_CONSOLE_API
+#define APP_BAILIAN_COMMODITY "sfm_codingplan_public_cn"
+#define APP_BAILIAN_HTTP_TIMEOUT_MS 10000
+
 // ---------------- zcode 用量（智谱 GLM Coding Plan，国内版） ----------------
 #define APP_ZCODE_URL \
     "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
@@ -41,7 +53,7 @@
     "awk '/MemTotal/{t=$2}/MemAvailable/{a=$2}END{printf \"MEM %d %d %d\\n\",(t-a)*100/t,t-a,t}' /proc/meminfo; " \
     "df -kP / | awk 'NR==2{printf \"DSK %d %d %d\\n\",$3*100/$2,$3,$2}'; " \
     "docker ps --format 'C|{{.ID}}|{{.Names}}|{{.State}}|{{.Ports}}' 2>/dev/null || echo NODOCKER"
-#define APP_SRV_SSH_PORT 22
+#define APP_SRV_SSH_PORT 22               // 未配置或旧 NVS 数据的默认 SSH 端口
 #define APP_SRV_CONNECT_TIMEOUT_MS 5000   // TCP 连接超时
 #define APP_SRV_TOTAL_TIMEOUT_MS 15000    // 握手+采集总预算
 #define APP_SRV_RESP_MAX 16384            // 输出累积上限

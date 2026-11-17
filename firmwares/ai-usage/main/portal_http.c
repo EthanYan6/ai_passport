@@ -4,8 +4,8 @@
 //  - DNS(UDP 53): 所有 A 查询都答 192.168.4.1 → 手机连热点后弹"登录到网络"
 //  - HTTP(TCP 80): 单线程顺序 accept。AP 模式最多 2 个连接，简单可靠。
 //  - 扫描在 STA 接口进行（APSTA 模式下 esp_wifi_scan_start 可用）。
-// 门户四张卡片：WiFi / 火山方舟密钥 / 智谱 API Key / 刷新间隔，
-// 分别 POST /save /ark /zcode /ui，保存进 NVS。
+// 门户卡片：WiFi / 火山方舟 / 智谱 / 阿里云百炼 / 刷新间隔 / 显示设置 / SSH 服务器。
+// 凭据分别 POST /save /ark /zcode /bailian 等接口保存进 NVS；显示设置走 /show。
 #include "portal_http.h"
 #include "wifi_manager.h"
 #include "usage_store.h"
@@ -233,6 +233,8 @@ static const char *PORTAL_HTML_HEAD =
     "justify-content:space-between;cursor:pointer}"
     ".msg{color:#39ff88;margin-top:4px;min-height:18px}"
     ".hint{color:#6e8ca0;font-size:13px}"
+    "label.chk{display:flex;align-items:center;gap:8px;padding:8px 0;font-size:15px}"
+    "label.chk input{width:auto;margin:0;flex:none}"
     "</style></head><body><h1>AI 用量胸牌 · 配网</h1>";
 
 // 无 Content-Length 的流式响应头：响应体由 Connection: close 界定。
@@ -337,9 +339,28 @@ static void send_portal_page(int sock)
         "document.getElementById('zmsg').textContent='已保存 ✓'}</script></div>",
         zkey);
 
-    // ---- 卡 4：刷新间隔 ----
+    // ---- 卡 4：阿里云百炼 Coding Plan（AK/SK 自动换取控制台令牌） ----
     send_lit(sock,
-        "<div class='card'><h2>4. 刷新间隔</h2><select id='refresh'>");
+        "<div class='card'><h2>4. 阿里云百炼 Coding Plan</h2>"
+        "<input id='bak' type='password' placeholder='AccessKey ID' autocomplete=off>"
+        "<input id='bsk' type='password' placeholder='AccessKey Secret'>"
+        "<button onclick=\"savebailian()\">保存百炼密钥</button>"
+        "<div class='msg' id='bmsg'></div>"
+        "<p class='hint'>查询 5 小时 / 每周 / 每月真实请求额度。"
+        "建议使用最小权限 RAM 子账号，密钥不回显。</p>"
+        "<script>function savebailian(){"
+        "var m=document.getElementById('bmsg');"
+        "var ak=document.getElementById('bak').value;"
+        "var sk=document.getElementById('bsk').value;"
+        "if(!ak||!sk){m.textContent='请填写 AK 和 SK';return}"
+        "fetch('/bailian',{method:'POST',body:"
+        "'bak='+encodeURIComponent(ak)+'&bsk='+encodeURIComponent(sk)})"
+        ".then(r=>{m.textContent=r.ok?'已保存 ✓':'保存失败'})"
+        ".catch(()=>{m.textContent='保存失败，请重试'})}</script></div>");
+
+    // ---- 卡 5：刷新间隔 ----
+    send_lit(sock,
+        "<div class='card'><h2>5. 刷新间隔</h2><select id='refresh'>");
     uint32_t cur = usage_store_get_refresh_s();
     char opt[96];
     for (size_t i = 0; i < APP_REFRESH_PRESETS_NUM; i++) {
@@ -371,17 +392,40 @@ static void send_portal_page(int sock)
         "'refresh='+document.getElementById('refresh').value});"
         "document.getElementById('rmsg').textContent='已保存 ✓'}</script></div>");
 
-    // ---- 卡 5：服务器管理（SSH 监控） ----
+    // ---- 卡 6：显示设置（隐藏的平台不进轮播、不再查询） ----
+    send_frag(sock,
+        "<div class='card'><h2>6. 显示设置（设备轮播页面）</h2>"
+        "<label class='chk'><input type='checkbox' id='show_ark'%s> 火山方舟</label>"
+        "<label class='chk'><input type='checkbox' id='show_zcode'%s> 智谱 zcode</label>"
+        "<label class='chk'><input type='checkbox' id='show_bailian'%s> 阿里云百炼</label>"
+        "<button onclick=\"saveshow()\">保存显示</button>"
+        "<div class='msg' id='vmsg'></div>"
+        "<p class='hint'>取消勾选的平台不出现在设备轮播，也不再查询其用量；"
+        "重新勾选保存后下一轮刷新自动恢复。</p>"
+        "<script>function saveshow(){"
+        "fetch('/show',{method:'POST',body:"
+        "'ark='+(document.getElementById('show_ark').checked?1:0)"
+        "+'&zcode='+(document.getElementById('show_zcode').checked?1:0)"
+        "+'&bailian='+(document.getElementById('show_bailian').checked?1:0)});"
+        "document.getElementById('vmsg').textContent='已保存 ✓'}</script></div>",
+        usage_store_get_show_ark() ? " checked" : "",
+        usage_store_get_show_zcode() ? " checked" : "",
+        usage_store_get_show_bailian() ? " checked" : "");
+
+    // ---- 卡 7：服务器管理（SSH 监控） ----
     send_lit(sock,
-        "<div class='card'><h2>5. 服务器（SSH 监控，最多 4 台）</h2>"
+        "<div class='card'><h2>7. 服务器（SSH 监控，最多 4 台）</h2>"
         "<div id='srvlist'></div>"
         "<input id='sip' placeholder='IP 或域名'>"
+        "<input id='sport' type='number' min='1' max='65535' value='22' "
+        "placeholder='SSH 端口（默认 22）'>"
         "<input id='suser' placeholder='SSH 账号'>"
         "<input id='spass' type='password' placeholder='SSH 密码'>"
         "<button onclick=\"saveSrv()\">添加 / 保存修改</button>"
         "<div class='msg' id='smsg'></div>"
-        "<p class='hint'>Linux 服务器，SSH 密码认证。每台服务器一个状态页："
-        "CPU / 内存 / 磁盘 / Docker 容器。修改时密码留空表示保持不变。</p>"
+        "<p class='hint'>Linux 服务器，SSH 密码认证，端口默认 22，可按实际修改。"
+        "每台服务器一个状态页：CPU / 内存 / 磁盘 / Docker 容器。"
+        "修改时密码留空表示保持不变。</p>"
         "<script>"
         "var editIdx=-1;"
         "function loadSrv(){"
@@ -391,12 +435,13 @@ static void send_portal_page(int sock)
         "   var d=document.createElement('div');d.style.cssText='display:flex;"
         "align-items:center;padding:6px 0;border-bottom:1px solid #22354a';"
         "   var t=document.createElement('span');t.style.flex='1';"
-        "   t.textContent=s.ip+' ('+s.user+')';d.appendChild(t);"
+        "   t.textContent=s.ip+':'+s.port+' ('+s.user+')';d.appendChild(t);"
         "   var b=document.createElement('button');b.type='button';b.textContent='改';"
         "   b.style.cssText='width:56px;padding:8px 0;margin:0;flex:none;"
         "background:#2a4356;color:#dfe9f3;font-size:14px';"
         "   b.onclick=()=>{editIdx=s.i;"
         "    document.getElementById('sip').value=s.ip;"
+        "    document.getElementById('sport').value=s.port||22;"
         "    document.getElementById('suser').value=s.user;"
         "    document.getElementById('spass').value='';"
         "    document.getElementById('smsg').textContent='修改中：'+s.ip+'，密码留空保持不变';};"
@@ -411,11 +456,14 @@ static void send_portal_page(int sock)
         "}"
         "function saveSrv(){"
         " var ip=document.getElementById('sip').value;"
+        " var port=document.getElementById('sport').value||'22';"
         " var u=document.getElementById('suser').value;"
         " var p=document.getElementById('spass').value;"
         " var m=document.getElementById('smsg');"
         " if(!ip){m.textContent='请填写 IP';return}"
+        " if(port<1||port>65535){m.textContent='端口范围 1-65535';return}"
         " var body='ip='+encodeURIComponent(ip)"
+        "  +'&port='+encodeURIComponent(port)"
         "  +'&user='+encodeURIComponent(u)"
         "  +'&pass='+encodeURIComponent(p);"
         " if(editIdx>=0){"
@@ -543,6 +591,22 @@ static void handle_zcode(int sock, const char *body)
     send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
 }
 
+static void handle_bailian(int sock, const char *body)
+{
+    char ak[USAGE_BAILIAN_AK_MAX] = { 0 };
+    char sk[USAGE_BAILIAN_SK_MAX] = { 0 };
+    bool has_ak = form_get(body, "bak", ak, sizeof(ak));
+    bool has_sk = form_get(body, "bsk", sk, sizeof(sk));
+    char old_ak[USAGE_BAILIAN_AK_MAX] = { 0 };
+    char old_sk[USAGE_BAILIAN_SK_MAX] = { 0 };
+    usage_store_get_bailian(old_ak, sizeof(old_ak), old_sk, sizeof(old_sk));
+    usage_store_set_bailian(has_ak ? ak : old_ak, has_sk ? sk : old_sk);
+    ESP_LOGI(TAG, "百炼密钥已保存 (ak=%d sk=%d)", has_ak, has_sk);
+    memset(old_sk, 0, sizeof(old_sk));
+    static const char ok[] = "OK";
+    send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
+}
+
 static void handle_ui(int sock, const char *body)
 {
     char val[16] = { 0 };
@@ -560,9 +624,30 @@ static void handle_ui(int sock, const char *body)
     send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
 }
 
+// POST /show：平台页显示开关（ark/zcode/bailian=0|1）。
+// 字段缺席 = 保持原值，避免异常请求把平台全部隐藏。
+static void handle_show(int sock, const char *body)
+{
+    char v[8] = { 0 };
+    if (form_get(body, "ark", v, sizeof(v)) && (v[0] == '0' || v[0] == '1')) {
+        usage_store_set_show_ark(v[0] == '1');
+    }
+    if (form_get(body, "zcode", v, sizeof(v)) && (v[0] == '0' || v[0] == '1')) {
+        usage_store_set_show_zcode(v[0] == '1');
+    }
+    if (form_get(body, "bailian", v, sizeof(v)) && (v[0] == '0' || v[0] == '1')) {
+        usage_store_set_show_bailian(v[0] == '1');
+    }
+    ESP_LOGI(TAG, "显示设置已保存: ark=%d zcode=%d bailian=%d",
+             usage_store_get_show_ark(), usage_store_get_show_zcode(),
+             usage_store_get_show_bailian());
+    static const char ok[] = "OK";
+    send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
+}
+
 // ---------------- 服务器管理 ----------------
 
-// GET /srvlist → [{"i":槽位,"ip":"..","user":".."},...]
+// GET /srvlist → [{"i":槽位,"ip":"..","port":22,"user":".."},...]
 static void handle_srv_list(int sock)
 {
     cJSON *arr = cJSON_CreateArray();
@@ -572,6 +657,7 @@ static void handle_srv_list(int sock)
         cJSON *item = cJSON_CreateObject();
         cJSON_AddNumberToObject(item, "i", srvs[i].idx);
         cJSON_AddStringToObject(item, "ip", srvs[i].ip);
+        cJSON_AddNumberToObject(item, "port", srvs[i].port);
         cJSON_AddStringToObject(item, "user", srvs[i].user);
         cJSON_AddItemToArray(arr, item);
     }
@@ -585,9 +671,9 @@ static void handle_srv_list(int sock)
     cJSON_free(json);
 }
 
-static void srv_form(const char *body, int *idx,
+static bool srv_form(const char *body, int *idx,
                      char *ip, size_t ip_len, char *user, size_t user_len,
-                     char *pass, size_t pass_len)
+                     char *pass, size_t pass_len, uint16_t *port)
 {
     char i[4] = { 0 };
     form_get(body, "i", i, sizeof(i));
@@ -595,6 +681,17 @@ static void srv_form(const char *body, int *idx,
     form_get(body, "user", user, user_len);
     form_get(body, "pass", pass, pass_len);
     *idx = atoi(i);
+
+    char value[8] = { 0 };
+    if (!form_get(body, "port", value, sizeof(value)) || !value[0]) {
+        *port = APP_SRV_SSH_PORT;
+        return true;
+    }
+    char *end = NULL;
+    long parsed = strtol(value, &end, 10);
+    if (!end || *end != '\0' || parsed < 1 || parsed > 65535) return false;
+    *port = (uint16_t)parsed;
+    return true;
 }
 
 static void handle_srv_add(int sock, const char *body)
@@ -603,13 +700,13 @@ static void handle_srv_add(int sock, const char *body)
     char ip[USAGE_SRV_IP_MAX] = { 0 }, user[USAGE_SRV_USER_MAX] = { 0 },
          pass[USAGE_SRV_PASS_MAX] = { 0 };
     int idx;
-    srv_form(body, &idx, ip, sizeof(ip), user, sizeof(user),
-             pass, sizeof(pass));
-    if (!ip[0]) {
-        send_response(sock, 400, "text/plain", "no ip", 5);
+    uint16_t port = APP_SRV_SSH_PORT;
+    if (!srv_form(body, &idx, ip, sizeof(ip), user, sizeof(user),
+                  pass, sizeof(pass), &port) || !ip[0]) {
+        send_response(sock, 400, "text/plain", "bad server", 10);
         return;
     }
-    int slot = usage_store_srv_add(ip, user, pass);
+    int slot = usage_store_srv_add(ip, user, pass, port);
     ESP_LOGI(TAG, "添加服务器 %s -> 槽位 %d", ip, slot);
     if (slot < 0) {
         send_response(sock, 400, "text/plain", "full", 4);
@@ -625,9 +722,10 @@ static void handle_srv_set(int sock, const char *body)
     char ip[USAGE_SRV_IP_MAX] = { 0 }, user[USAGE_SRV_USER_MAX] = { 0 },
          pass[USAGE_SRV_PASS_MAX] = { 0 };
     int idx;
-    srv_form(body, &idx, ip, sizeof(ip), user, sizeof(user),
-             pass, sizeof(pass));
-    if (idx < 0 || idx >= USAGE_SRV_MAX || !ip[0]) {
+    uint16_t port = APP_SRV_SSH_PORT;
+    if (!srv_form(body, &idx, ip, sizeof(ip), user, sizeof(user),
+                  pass, sizeof(pass), &port) ||
+        idx < 0 || idx >= USAGE_SRV_MAX || !ip[0]) {
         send_response(sock, 400, "text/plain", "bad", 3);
         return;
     }
@@ -637,7 +735,7 @@ static void handle_srv_set(int sock, const char *body)
         return;
     }
     // 密码留空 = 保持原密码
-    usage_store_srv_set(idx, ip, user, pass[0] ? pass : cur.pass);
+    usage_store_srv_set(idx, ip, user, pass[0] ? pass : cur.pass, port);
     ESP_LOGI(TAG, "修改服务器槽位 %d -> %s", idx, ip);
     static const char ok[] = "OK";
     send_response(sock, 200, "text/plain", ok, sizeof(ok) - 1);
@@ -707,8 +805,12 @@ static void http_task_fn(void *arg)
                 handle_ark(conn, body);
             } else if (is_post && strncmp(rx, "POST /zcode", 11) == 0 && body) {
                 handle_zcode(conn, body);
+            } else if (is_post && strncmp(rx, "POST /bailian", 13) == 0 && body) {
+                handle_bailian(conn, body);
             } else if (is_post && strncmp(rx, "POST /ui", 8) == 0 && body) {
                 handle_ui(conn, body);
+            } else if (is_post && strncmp(rx, "POST /show", 10) == 0 && body) {
+                handle_show(conn, body);
             } else if (is_post && strncmp(rx, "POST /srv/add", 13) == 0 && body) {
                 handle_srv_add(conn, body);
             } else if (is_post && strncmp(rx, "POST /srv/set", 13) == 0 && body) {

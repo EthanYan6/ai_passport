@@ -1,9 +1,10 @@
 // main/main.c —— ai-usage：应用编排（事件队列 + 页面切换 + 自动刷新）
 //
-// 与 pc-monitor 不同，本固件自带网络栈：WiFi 连上后由 usage_worker 直接
-// 拉取火山方舟与智谱 zcode 用量，结果经队列回传，app 任务持 LVGL 锁渲染。
-// 模式：NORMAL（火山 / zcode / 设置 三页轮转）/ PROVISION（扫码配网覆盖页）。
+// 与 pc-monitor 不同，本固件自带网络栈：WiFi 连上后由 usage_worker 串行
+// 拉取火山方舟、智谱 zcode、阿里云百炼与 SSH 服务器用量，结果经队列回传。
+// 模式：NORMAL（动态页面轮转）/ PROVISION（扫码配网覆盖页）。
 // 页面按需构建（复用 pc-monitor 规避 80KB LVGL 池耗尽的手法）。
+// 平台页（方舟/zcode/百炼）可在门户“显示设置”里逐个隐藏，隐藏后不采集不轮播。
 #include "bsp_display.h"
 #include "bsp_button.h"
 #include "bsp_battery.h"
@@ -16,6 +17,7 @@
 #include "ui_common.h"
 #include "ui_ark.h"
 #include "ui_zcode.h"
+#include "ui_bailian.h"
 #include "ui_server.h"
 #include "ui_settings.h"
 #include "ui_provision.h"
@@ -36,11 +38,10 @@
 
 static const char *TAG = "ai_usage";
 
-#define PAGE_ARK 0
-#define PAGE_ZCODE 1
-#define PAGE_SRV_BASE 2
-// 动态页布局：火山 / zcode / 服务器×N / 设置
-#define PAGE_SLOTS_MAX (PAGE_SRV_BASE + USAGE_SRV_MAX + 1)
+// 平台 kind：顺序即轮播顺序（门户“显示设置”可逐个隐藏）
+enum { PROV_ARK = 0, PROV_ZCODE, PROV_BAILIAN, PROV_NUM };
+// 动态页布局：可见平台×k / 服务器×N / 设置（槽位上限 3+4+1）
+#define PAGE_SLOTS_MAX (PROV_NUM + USAGE_SRV_MAX + 1)
 
 typedef enum {
     MODE_NORMAL = 0,
@@ -63,12 +64,13 @@ typedef struct {
 
 static QueueHandle_t s_queue;
 static volatile app_mode_t s_mode = MODE_NORMAL;
-static int s_view = PAGE_ARK;
+static int s_view = 0;
 static bool s_paused;
 static bool s_fetch_pending;
 static int64_t s_last_fetch_ms;    // 最近一次结果到达时刻（自动刷新节拍）
 static bool s_ark_ok;
 static bool s_zcode_ok;
+static bool s_bailian_ok;
 static bool s_ever_fetched;
 static int64_t s_leave_at_ms;      // 配网成功后延迟返回 NORMAL 的时刻，0=无
 static int s_batt_pct = -1;
@@ -88,9 +90,22 @@ static int s_built_view = -1;
 
 static ark_data_t s_ark;
 static zcode_data_t s_zcode;
+static bailian_data_t s_bailian;
 static srv_data_t s_srv[USAGE_SRV_MAX];
 static usage_srv_t s_srv_order[USAGE_SRV_MAX];   // 位置 -> 槽位映射（每 tick 刷新）
 static int s_srv_count;
+static bool s_show[PROV_NUM];                    // 平台显示开关（每 tick 重读）
+static int s_prov_view[PROV_NUM];                // 位置 -> 平台 kind 映射（每 tick 刷新）
+static int s_prov_count;
+
+// 平台显示开关 -> 轮播布局映射（固定顺序：方舟 / zcode / 百炼，跳过隐藏项）
+static void refresh_prov_layout(void)
+{
+    s_prov_count = 0;
+    for (int k = 0; k < PROV_NUM; k++) {
+        if (s_show[k]) s_prov_view[s_prov_count++] = k;
+    }
+}
 
 // ---------------- 事件入队（回调上下文只允许入队） ----------------
 
@@ -118,7 +133,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 }
 
 // ---------------- 刷新触发 ----------------
-// 动态页布局：0=火山 1=zcode 2..2+N-1=服务器 2+N=设置（见 page_count/page_settings）
+// 动态页布局：可见平台×k / 服务器×N / 设置（见 page_count/page_settings）
 
 static int page_count(void);
 static int page_settings(void);
@@ -233,6 +248,12 @@ static void handle_result(const usage_result_t *res)
         s_ever_fetched = true;
         s_last_fetch_ms = now;
         ESP_LOGI(TAG, "zcode err=%d", s_zcode.err);
+    } else if (res->kind == USAGE_RES_BAILIAN) {
+        s_bailian = res->bailian;
+        s_bailian_ok = s_bailian.err == 1 || s_bailian.err == 0;
+        s_ever_fetched = true;
+        s_last_fetch_ms = now;
+        ESP_LOGI(TAG, "百炼 err=%d", s_bailian.err);
     } else if (res->kind == USAGE_RES_SRV) {
         if (res->srv.slot < USAGE_SRV_MAX) {
             s_srv[res->srv.slot] = res->srv;
@@ -240,6 +261,7 @@ static void handle_result(const usage_result_t *res)
         s_ever_fetched = true;
         s_last_fetch_ms = now;
     } else {   // USAGE_RES_DONE：一轮结束
+        s_ever_fetched = true;   // 全部平台隐藏且无服务器时也认为“已完成一轮”
         s_fetch_pending = false;
     }
 }
@@ -274,7 +296,7 @@ static void handle_button(bsp_btn_t btn, bsp_btn_ev_t ev)
     } else if (ev == BSP_BTN_LONG) {
         if (btn == BSP_BTN_UP || btn == BSP_BTN_DOWN) {
             // 服务器页：长按上/下翻容器列表（页面已构建才碰 LVGL 对象）
-            if (s_view >= PAGE_SRV_BASE && s_view < page_settings() &&
+            if (s_view >= s_prov_count && s_view < page_settings() &&
                 s_built_view == s_view) {
                 ui_server_page_step(btn == BSP_BTN_UP ? -1 : 1);
             }
@@ -292,16 +314,16 @@ static void handle_button(bsp_btn_t btn, bsp_btn_ev_t ev)
 }
 
 // ---------------- 页面按需构建 ----------------
-// 视图布局：0=火山 1=zcode 2..2+N-1=服务器 2+N=设置
+// 视图布局：可见平台×k（顺序方舟/zcode/百炼）/ 服务器×N / 设置
 
 static int page_count(void)
 {
-    return PAGE_SRV_BASE + s_srv_count + 1;
+    return s_prov_count + s_srv_count + 1;
 }
 
 static int page_settings(void)
 {
-    return PAGE_SRV_BASE + s_srv_count;
+    return s_prov_count + s_srv_count;
 }
 
 static void page_show(int view)
@@ -312,20 +334,22 @@ static void page_show(int view)
         s_page[s_built_view] = NULL;
     }
     s_page[view] = ui_make_container(s_scr, 0, 34, 240, 262);
-    switch (view) {
-    case PAGE_ARK:
-        ui_ark_build(s_page[view]);
-        break;
-    case PAGE_ZCODE:
-        ui_zcode_build(s_page[view]);
-        break;
-    default:
-        if (view < page_settings()) {
-            ui_server_build(s_page[view]);
-        } else {
-            ui_settings_build(s_page[view]);
+    if (view < s_prov_count) {
+        switch (s_prov_view[view]) {
+        case PROV_ARK:
+            ui_ark_build(s_page[view]);
+            break;
+        case PROV_ZCODE:
+            ui_zcode_build(s_page[view]);
+            break;
+        default:
+            ui_bailian_build(s_page[view]);
+            break;
         }
-        break;
+    } else if (view < page_settings()) {
+        ui_server_build(s_page[view]);
+    } else {
+        ui_settings_build(s_page[view]);
     }
     s_built_view = view;
 }
@@ -337,8 +361,22 @@ static void render(void)
     if (!s_scr) return;
 
     bool provision = s_mode == MODE_PROVISION;
-    if (!provision) {
-        page_show(s_view);
+
+    // 平台显示开关每 tick 重读（门户“显示设置”可能改过）；
+    // 开关变化时布局改变，强制下方的 page_show 重建当前页。
+    bool show_changed = false;
+    bool show_now[PROV_NUM] = {
+        usage_store_get_show_ark(),
+        usage_store_get_show_zcode(),
+        usage_store_get_show_bailian(),
+    };
+    for (int k = 0; k < PROV_NUM; k++) {
+        if (show_now[k] != s_show[k]) show_changed = true;
+        s_show[k] = show_now[k];
+    }
+    refresh_prov_layout();
+    if (show_changed) {
+        s_built_view = -1;
     }
 
     // 位置->槽位映射每 tick 刷新（门户可能增删服务器，页面数随之变化）
@@ -347,25 +385,50 @@ static void render(void)
         s_view = page_count() - 1;
     }
 
-    // 页名：火山 / zcode / 服务器N / 设置 / 配网
+    if (!provision) {
+        page_show(s_view);
+    }
+
+    // 页名：火山 / zcode / 百炼 / 服务器N / 设置 / 配网
     static char srv_title[24];
+    static const char *const prov_titles[PROV_NUM] = {"火山", "zcode", "百炼"};
     if (provision) {
         lv_label_set_text(s_title, "配网");
-    } else if (s_view == PAGE_ARK) {
-        lv_label_set_text(s_title, "火山");
-    } else if (s_view == PAGE_ZCODE) {
-        lv_label_set_text(s_title, "zcode");
+    } else if (s_view < s_prov_count) {
+        lv_label_set_text(s_title, prov_titles[s_prov_view[s_view]]);
     } else if (s_view < page_settings()) {
         snprintf(srv_title, sizeof(srv_title), "服务器%d",
-                 s_view - PAGE_SRV_BASE + 1);
+                 s_view - s_prov_count + 1);
         lv_label_set_text(s_title, srv_title);
     } else {
         lv_label_set_text(s_title, "设置");
     }
 
-    // 状态点：AP=配网中；NO WIFI=未连接；NO KEY=两家均未配置；
-    // WIFI=已配置接口全部成功；FAIL=已配置接口失败；WAIT=等待首轮结果
+    // 状态点：AP=配网中；NO WIFI=未连接；NO KEY=可见平台均未配置；
+    // WIFI=可见接口全部成功；FAIL=可见接口失败；WAIT=等待首轮结果
     bool connected = wifi_manager_state() == WIFI_MGR_CONNECTED;
+    bool all_nokey = s_prov_count > 0;
+    bool all_ok = true;
+    for (int i = 0; i < s_prov_count; i++) {
+        int err;
+        bool ok;
+        switch (s_prov_view[i]) {
+        case PROV_ARK:
+            err = s_ark.err;
+            ok = s_ark_ok;
+            break;
+        case PROV_ZCODE:
+            err = s_zcode.err;
+            ok = s_zcode_ok;
+            break;
+        default:
+            err = s_bailian.err;
+            ok = s_bailian_ok;
+            break;
+        }
+        if (err != 1) all_nokey = false;
+        if (!ok) all_ok = false;
+    }
     uint32_t dot_color;
     const char *link;
     if (provision) {
@@ -374,10 +437,10 @@ static void render(void)
     } else if (!connected) {
         dot_color = C_RED;
         link = "NO WIFI";
-    } else if (s_ever_fetched && s_ark.err == 1 && s_zcode.err == 1) {
+    } else if (s_ever_fetched && all_nokey) {
         dot_color = C_AMBER;
         link = "NO KEY";
-    } else if (s_ever_fetched && s_ark_ok && s_zcode_ok) {
+    } else if (s_ever_fetched && all_ok) {
         dot_color = C_GREEN;
         link = "WIFI";
     } else if (s_ever_fetched) {
@@ -405,7 +468,7 @@ static void render(void)
         lv_label_set_text(s_hint, "OK:time  HOLD:provision");
     } else if (s_paused) {
         lv_label_set_text(s_hint, "PAUSED  OK:refr  HOLD:resume");
-    } else if (s_view >= PAGE_SRV_BASE && s_view < page_settings()) {
+    } else if (s_view >= s_prov_count && s_view < page_settings()) {
         lv_label_set_text(s_hint, "HOLD UP/DN:ct page  OK:refr");
     } else {
         lv_label_set_text(s_hint, "UP/DN page  OK:refr  HOLD:pause");
@@ -416,12 +479,20 @@ static void render(void)
     long elapsed_s = s_ever_fetched
                          ? (long)((esp_timer_get_time() / 1000 - s_last_fetch_ms) / 1000)
                          : 0;
-    if (s_view == PAGE_ARK) {
-        ui_ark_render(&s_ark, elapsed_s);
-    } else if (s_view == PAGE_ZCODE) {
-        ui_zcode_render(&s_zcode, elapsed_s);
+    if (s_view < s_prov_count) {
+        switch (s_prov_view[s_view]) {
+        case PROV_ARK:
+            ui_ark_render(&s_ark, elapsed_s);
+            break;
+        case PROV_ZCODE:
+            ui_zcode_render(&s_zcode, elapsed_s);
+            break;
+        default:
+            ui_bailian_render(&s_bailian, elapsed_s);
+            break;
+        }
     } else if (s_view < page_settings()) {
-        int slot = s_srv_order[s_view - PAGE_SRV_BASE].idx;
+        int slot = s_srv_order[s_view - s_prov_count].idx;
         ui_server_render(&s_srv[slot], elapsed_s);
     } else {
         ui_settings_info_t info = { 0 };
@@ -471,7 +542,8 @@ static void app_task(void *arg)
                 handle_wifi_event(e.wifi);
             }
         }
-        usage_result_t res;
+        // 结果队列项约 4KB（srv_data_t 为最大成员），放 static 避免占满 6KB 任务栈
+        static usage_result_t res;
         while (xQueueReceive(result_queue, &res, 0) == pdTRUE) {
             handle_result(&res);
         }
@@ -533,6 +605,10 @@ void app_main(void)
     memset(s_srv, 0, sizeof(s_srv));
     for (int i = 0; i < ARK_WINDOWS; i++) s_ark.reset_s[i] = -1;
     for (int i = 0; i < ZCODE_ROWS; i++) s_zcode.reset_s[i] = -1;
+    s_show[PROV_ARK] = usage_store_get_show_ark();
+    s_show[PROV_ZCODE] = usage_store_get_show_zcode();
+    s_show[PROV_BAILIAN] = usage_store_get_show_bailian();
+    refresh_prov_layout();
     s_srv_count = usage_store_srv_list(s_srv_order, USAGE_SRV_MAX);
 
     s_queue = xQueueCreate(QUEUE_DEPTH, sizeof(app_event_t));

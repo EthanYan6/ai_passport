@@ -152,7 +152,13 @@ void ui_server_render(const srv_data_t *d, long elapsed_s)
 
     s_cache = *d;
 
-    lv_label_set_text(s_ip_lbl, d->ip[0] ? d->ip : "--");
+    if (d->ip[0]) {
+        char host[USAGE_SRV_IP_MAX + 8];
+        snprintf(host, sizeof(host), "%s:%u", d->ip, (unsigned)d->port);
+        lv_label_set_text(s_ip_lbl, host);
+    } else {
+        lv_label_set_text(s_ip_lbl, "--");
+    }
     lv_label_set_text(s_user_lbl, d->user[0] ? d->user : "--");
 
     float vals[3] = { ok ? d->cpu_pct : -1.0f, ok ? (float)d->mem_pct : -1.0f,
@@ -174,8 +180,15 @@ void ui_server_render(const srv_data_t *d, long elapsed_s)
             } else {
                 ui_label_printf(s_pct[i], "%d%%", v);
                 if (i == 1) {
-                    ui_label_printf(s_val[i], "%d/%dM", d->mem_used_mb,
-                                    d->mem_total_mb);
+                    // 内存以 MB 存储，≥1GB 时显示为 G（与磁盘行风格一致）
+                    if (d->mem_total_mb >= 1024) {
+                        ui_label_printf(s_val[i], "%d/%dG",
+                                        (d->mem_used_mb + 512) / 1024,
+                                        (d->mem_total_mb + 512) / 1024);
+                    } else {
+                        ui_label_printf(s_val[i], "%d/%dM", d->mem_used_mb,
+                                        d->mem_total_mb);
+                    }
                 } else {
                     ui_label_printf(s_val[i], "%d/%dG", d->disk_used_gb,
                                     d->disk_total_gb);

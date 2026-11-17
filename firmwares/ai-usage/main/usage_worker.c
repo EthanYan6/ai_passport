@@ -4,13 +4,14 @@
 // 未配置密钥时客户端直接返回 err=1，不发起请求。结果结构体按值进队列，
 // 由 app 任务在 LVGL 锁内消费渲染。
 #include "usage_worker.h"
+#include "usage_store.h"
 #include "ark_client.h"
 #include "zcode_client.h"
+#include "bailian_client.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <string.h>
 
 static const char *TAG = "usage_worker";
 
@@ -21,43 +22,61 @@ static volatile bool s_busy;
 static void worker_task(void *arg)
 {
     (void)arg;
+    // 结果队列项约 4KB（srv_data_t 为最大成员），放 static 避免占满 12KB 任务栈
+    static usage_result_t res;
     uint8_t req;
     for (;;) {
         if (xQueueReceive(s_req_queue, &req, portMAX_DELAY) != pdTRUE) continue;
 
-        ark_data_t ark;
-        ark_client_fetch(&ark);
-        usage_result_t res = { 0 };
-        res.kind = USAGE_RES_ARK;
-        res.ark = ark;
-        xQueueSend(s_result_queue, &res, 0);
-        ESP_LOGI(TAG, "ark err=%d plan=%s", ark.err,
-                 ark.plan[0] ? ark.plan : "-");
+        if (usage_store_get_show_ark()) {
+            ark_data_t ark;
+            ark_client_fetch(&ark);
+            res = (usage_result_t){ 0 };
+            res.kind = USAGE_RES_ARK;
+            res.ark = ark;
+            xQueueSend(s_result_queue, &res, 0);
+            ESP_LOGI(TAG, "ark err=%d plan=%s", ark.err,
+                     ark.plan[0] ? ark.plan : "-");
+        }
 
-        zcode_data_t zcode;
-        zcode_client_fetch(&zcode);
-        memset(&res, 0, sizeof(res));
-        res.kind = USAGE_RES_ZCODE;
-        res.zcode = zcode;
-        xQueueSend(s_result_queue, &res, 0);
-        ESP_LOGI(TAG, "zcode err=%d level=%s", zcode.err,
-                 zcode.level[0] ? zcode.level : "-");
+        if (usage_store_get_show_zcode()) {
+            zcode_data_t zcode;
+            zcode_client_fetch(&zcode);
+            res = (usage_result_t){ 0 };
+            res.kind = USAGE_RES_ZCODE;
+            res.zcode = zcode;
+            xQueueSend(s_result_queue, &res, 0);
+            ESP_LOGI(TAG, "zcode err=%d level=%s", zcode.err,
+                     zcode.level[0] ? zcode.level : "-");
+        }
+
+        if (usage_store_get_show_bailian()) {
+            bailian_data_t bailian;
+            bailian_client_fetch(&bailian);
+            res = (usage_result_t){ 0 };
+            res.kind = USAGE_RES_BAILIAN;
+            res.bailian = bailian;
+            xQueueSend(s_result_queue, &res, 0);
+            ESP_LOGI(TAG, "bailian err=%d quotas=%d", bailian.err,
+                     bailian.quota_count);
+        }
 
         // 逐台 SSH 采集（串行：SSH 握手内存开销大）
         usage_srv_t servers[USAGE_SRV_MAX];
         int n = usage_store_srv_list(servers, USAGE_SRV_MAX);
         for (int i = 0; i < n; i++) {
-            memset(&res, 0, sizeof(res));
+            res = (usage_result_t){ 0 };
             res.kind = USAGE_RES_SRV;
             srv_client_fetch(&servers[i], &res.srv);
             xQueueSend(s_result_queue, &res, 0);
-            ESP_LOGI(TAG, "srv[%d] %s err=%d cpu=%.1f mem=%d dsk=%d ct=%d",
-                     servers[i].idx, servers[i].ip, res.srv.err,
+            ESP_LOGI(TAG, "srv[%d] %s:%u err=%d cpu=%.1f mem=%d dsk=%d ct=%d",
+                     servers[i].idx, servers[i].ip, (unsigned)servers[i].port,
+                     res.srv.err,
                      (double)res.srv.cpu_pct, res.srv.mem_pct,
                      res.srv.disk_pct, res.srv.container_count);
         }
 
-        memset(&res, 0, sizeof(res));
+        res = (usage_result_t){ 0 };
         res.kind = USAGE_RES_DONE;
         xQueueSend(s_result_queue, &res, 0);
 

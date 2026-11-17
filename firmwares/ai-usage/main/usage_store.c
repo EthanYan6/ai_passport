@@ -1,10 +1,12 @@
 // main/usage_store.c —— NVS 存取实现
 //
-// 四个命名空间：
-//   wifi  ssid/pass      配网门户写入，wifi_manager 读取
-//   ark   ak/sk/host/plan 火山方舟 V4 签名密钥与套餐标签（host 可选）
-//   zcode apikey         智谱 GLM Coding Plan 用量查询密钥
-//   ui    refresh        自动刷新间隔（秒，uint32）
+// 命名空间：
+//   wifi    ssid/pass      配网门户写入，wifi_manager 读取
+//   ark     ak/sk/host/plan 火山方舟 V4 签名密钥与套餐标签（host 可选）
+//   zcode   apikey         智谱 GLM Coding Plan 用量查询密钥
+//   bailian ak/sk          阿里云百炼控制台查询凭据
+//   server  srvN/*         SSH 服务器地址、端口与凭据
+//   ui      refresh/show_* 自动刷新间隔（秒）、平台页显示开关（u8，1=显示）
 #include "usage_store.h"
 #include "app_config.h"
 
@@ -138,6 +140,28 @@ bool usage_store_has_zcode(void)
     return has_str("zcode", "apikey");
 }
 
+// ---------------- 阿里云百炼 Coding Plan ----------------
+
+esp_err_t usage_store_get_bailian(char *ak, size_t ak_len,
+                                  char *sk, size_t sk_len)
+{
+    esp_err_t err = get_str("bailian", "ak", ak, ak_len);
+    if (err != ESP_OK) return err;
+    return get_str("bailian", "sk", sk, sk_len);
+}
+
+esp_err_t usage_store_set_bailian(const char *ak, const char *sk)
+{
+    esp_err_t err = set_str("bailian", "ak", ak);
+    if (err == ESP_OK) err = set_str("bailian", "sk", sk ? sk : "");
+    return err;
+}
+
+bool usage_store_has_bailian(void)
+{
+    return has_str("bailian", "ak");
+}
+
 // ---------------- 刷新间隔 ----------------
 
 uint32_t usage_store_get_refresh_s(void)
@@ -160,10 +184,61 @@ void usage_store_set_refresh_s(uint32_t seconds)
     nvs_close(h);
 }
 
+// ---------------- 平台页显示开关（缺省显示） ----------------
+
+static bool show_get(const char *key)
+{
+    nvs_handle_t h;
+    uint8_t v = 1;   // 未写入过 = 显示
+    if (nvs_open("ui", NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_u8(h, key, &v);
+        nvs_close(h);
+    }
+    return v != 0;
+}
+
+static void show_set(const char *key, bool show)
+{
+    nvs_handle_t h;
+    if (nvs_open("ui", NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_u8(h, key, show ? 1 : 0) == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+}
+
+bool usage_store_get_show_ark(void)
+{
+    return show_get("show_ark");
+}
+
+void usage_store_set_show_ark(bool show)
+{
+    show_set("show_ark", show);
+}
+
+bool usage_store_get_show_zcode(void)
+{
+    return show_get("show_zcode");
+}
+
+void usage_store_set_show_zcode(bool show)
+{
+    show_set("show_zcode", show);
+}
+
+bool usage_store_get_show_bailian(void)
+{
+    return show_get("show_bailian");
+}
+
+void usage_store_set_show_bailian(bool show)
+{
+    show_set("show_bailian", show);
+}
+
 // ---------------- 服务器（SSH 监控） ----------------
 //
-// 每台服务器一个命名空间 "srvN"（N=槽位 0..3），键 ip/user/pass。
-// 槽位固定：删除只清键不复位编号，页面映射 = 有内容的槽位。
+// 每台服务器一个命名空间 "srvN"（N=槽位 0..3），键 ip/port/user/pass。
+// 槽位固定：删除只清配置不复位编号，页面映射 = 有内容的槽位。
 
 static esp_err_t srv_get(int idx, usage_srv_t *out)
 {
@@ -174,17 +249,34 @@ static esp_err_t srv_get(int idx, usage_srv_t *out)
     }
     get_str(ns, "user", out->user, sizeof(out->user));
     get_str(ns, "pass", out->pass, sizeof(out->pass));
+    out->port = APP_SRV_SSH_PORT;
+    nvs_handle_t h;
+    if (nvs_open(ns, NVS_READONLY, &h) == ESP_OK) {
+        uint16_t port = 0;
+        if (nvs_get_u16(h, "port", &port) == ESP_OK && port > 0) {
+            out->port = port;
+        }
+        nvs_close(h);
+    }
     out->idx = idx;
     return out->ip[0] ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
-static void srv_set(int idx, const char *ip, const char *user, const char *pass)
+static void srv_set(int idx, const char *ip, const char *user, const char *pass,
+                    uint16_t port)
 {
     char ns[8];
     snprintf(ns, sizeof(ns), "srv%d", idx);
     set_str(ns, "ip", ip ? ip : "");
     set_str(ns, "user", user ? user : "");
     set_str(ns, "pass", pass ? pass : "");
+    nvs_handle_t h;
+    if (nvs_open(ns, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_u16(h, "port", port ? port : APP_SRV_SSH_PORT) == ESP_OK) {
+            nvs_commit(h);
+        }
+        nvs_close(h);
+    }
 }
 
 int usage_store_srv_count(void)
@@ -206,13 +298,14 @@ int usage_store_srv_list(usage_srv_t *out, int max)
     return n;
 }
 
-int usage_store_srv_add(const char *ip, const char *user, const char *pass)
+int usage_store_srv_add(const char *ip, const char *user, const char *pass,
+                        uint16_t port)
 {
     if (!ip || !ip[0]) return -1;
     for (int i = 0; i < USAGE_SRV_MAX; i++) {
         usage_srv_t tmp;
         if (srv_get(i, &tmp) != ESP_OK) {
-            srv_set(i, ip, user, pass);
+            srv_set(i, ip, user, pass, port);
             return i;
         }
     }
@@ -226,14 +319,14 @@ bool usage_store_srv_get(int idx, usage_srv_t *out)
 }
 
 void usage_store_srv_set(int idx, const char *ip, const char *user,
-                         const char *pass)
+                         const char *pass, uint16_t port)
 {
     if (idx < 0 || idx >= USAGE_SRV_MAX) return;
-    srv_set(idx, ip, user, pass);
+    srv_set(idx, ip, user, pass, port);
 }
 
 void usage_store_srv_del(int idx)
 {
     if (idx < 0 || idx >= USAGE_SRV_MAX) return;
-    srv_set(idx, "", "", "");
+    srv_set(idx, "", "", "", APP_SRV_SSH_PORT);
 }

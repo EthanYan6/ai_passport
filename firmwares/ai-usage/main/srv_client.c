@@ -97,16 +97,16 @@ static bool wait_io(int fd, bool write, int64_t deadline)
 }
 
 // 非阻塞 TCP 连接（含 DNS 解析），超时返回 -1
-static int tcp_connect(const char *host, int64_t deadline)
+static int tcp_connect(const char *host, uint16_t port, int64_t deadline)
 {
-    char port[8];
-    snprintf(port, sizeof(port), "%d", APP_SRV_SSH_PORT);
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
     struct addrinfo hints = {
         .ai_family = AF_UNSPEC,
         .ai_socktype = SOCK_STREAM,
     };
     struct addrinfo *res = NULL;
-    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) {
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
         return -1;
     }
     int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -269,12 +269,13 @@ void srv_client_fetch(const usage_srv_t *srv, srv_data_t *result)
         result->containers[i].state = 1;
     }
     strlcpy(result->ip, srv->ip, sizeof(result->ip));
+    result->port = srv->port;
     strlcpy(result->user, srv->user, sizeof(result->user));
     result->slot = (uint8_t)srv->idx;
 
     int64_t deadline = now_ms() + DEADLINE_MS;
 
-    int fd = tcp_connect(srv->ip, deadline);
+    int fd = tcp_connect(srv->ip, srv->port, deadline);
     if (fd < 0) {
         result->err = 2;
         return;

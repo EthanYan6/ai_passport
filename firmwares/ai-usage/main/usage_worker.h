@@ -6,11 +6,13 @@
 #include "freertos/queue.h"
 #include "ark_client.h"
 #include "zcode_client.h"
+#include "bailian_client.h"
 #include "srv_client.h"
 
 typedef enum {
     USAGE_RES_ARK = 0,    // 火山结果（先回）
     USAGE_RES_ZCODE,      // zcode 结果
+    USAGE_RES_BAILIAN,    // 阿里云百炼结果
     USAGE_RES_SRV,        // 每台服务器一条（res.srv.slot 为槽位号）
     USAGE_RES_DONE,       // 一轮全部结束（app 据此清 pending）
 } usage_res_kind_t;
@@ -20,6 +22,7 @@ typedef struct {
     union {               // 按类型只用其一；联合体让结果队列省 ~2/3 内存
         ark_data_t ark;
         zcode_data_t zcode;
+        bailian_data_t bailian;
         srv_data_t srv;
     };
 } usage_result_t;
